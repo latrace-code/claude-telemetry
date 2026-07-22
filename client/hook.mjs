@@ -16,7 +16,7 @@ import { basename, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { analyzeTranscript, readEvents, scanSidechains } from './telemetry-lib.mjs';
-import { STATE_DIR, QUEUE_DIR, loadConfig } from './paths.mjs';
+import { STATE_DIR, QUEUE_DIR, loadConfig, projectAllowed } from './paths.mjs';
 
 // Mesure : 5,1 s pour les 336 Mo d'une nuit orchestree. Au-dela du budget la fiche sort
 // `partial:true` ; le serveur garde le transcript complet, donc rien n'est perdu.
@@ -68,6 +68,8 @@ function main() {
   const sid = input.session_id || input.sessionId || '';
   const cwd = input.cwd || process.cwd();
   if (!transcriptPath || !existsSync(transcriptPath) || !sid) process.exit(0);
+  // Perimetre : hors allowlist (include_projects), on ne capte pas cette session.
+  if (!projectAllowed(cwd, cfg)) process.exit(0);
 
   const events = readEvents(readFileSync, transcriptPath);
   const sessionDir = transcriptPath.replace(/\.jsonl$/, '');

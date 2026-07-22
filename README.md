@@ -35,6 +35,36 @@ vérifié sur une machine sans clé SSH ni credentials).
 Pour couper le capteur : `LATRACE_TELEMETRY_OFF=1`, ou `{"enabled": false}` dans
 `~/.latrace-telemetry/config.json`.
 
+## Périmètre : ne remonter qu'une partie de ses sessions
+
+Par défaut le capteur remonte **toutes** les sessions Claude Code du poste. Sur une machine qui
+mélange travail d'équipe et projets personnels, on restreint l'envoi à une liste de dossiers avec
+`include_projects` dans `~/.latrace-telemetry/config.json` :
+
+```json
+{
+  "endpoint": "...",
+  "token": "...",
+  "user": "prenom",
+  "include_projects": ["/Users/moi/Developer/LaTrace"]
+}
+```
+
+Liste de préfixes de chemins réels. Une session n'est captée que si son dossier de travail est l'un
+d'eux ou un sous-dossier (worktrees inclus). Tout le reste - autres projets, dossiers perso - n'est ni
+calculé, ni mis en file, ni rattrapé au bootstrap.
+
+- **Liste absente ou vide** : comportement historique, tout remonte. Un poste qui ne configure rien
+  n'est pas affecté.
+- **Allowlist stricte** : par défaut rien ne part, seul ce qui matche est envoyé. Un dossier oublié
+  ne fuite pas, il est ignoré.
+- **À poser avant la première session** : le bootstrap (rattrapage d'historique) respecte la liste,
+  donc elle doit être en place avant le premier démarrage pour qu'aucune session hors périmètre ne parte.
+
+Le filtrage porte sur le chemin, pas sur le contenu : un transcript retenu peut toujours contenir ce
+que les commandes ont affiché, donc potentiellement des secrets. Le périmètre réduit ce qui part, il
+ne rend pas anodin ce qui reste.
+
 ## Architecture
 
 ```
