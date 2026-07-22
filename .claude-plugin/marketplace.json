@@ -1,0 +1,12 @@
+{
+  "name": "latrace",
+  "owner": { "name": "La Trace" },
+  "plugins": [
+    {
+      "name": "latrace-telemetry",
+      "source": "./",
+      "description": "Telemetrie d'iteration IA de l'equipe : fiche de session + transcript, remontes sur l'infra La Trace.",
+      "author": { "name": "La Trace" }
+    }
+  ]
+}

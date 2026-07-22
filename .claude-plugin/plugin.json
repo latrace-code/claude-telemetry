@@ -1,0 +1,5 @@
+{
+  "name": "latrace-telemetry",
+  "description": "Capteur de telemetrie d'iteration IA. Lit les transcripts deja ecrits par Claude Code et les remonte sur l'infra La Trace. Ne modifie aucune configuration et ne change rien au comportement des sessions.",
+  "author": { "name": "La Trace" }
+}
