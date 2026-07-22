@@ -74,7 +74,14 @@ for (const s of sessions.values()) {
         headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.token}` },
         body: JSON.stringify({ card }),
       });
-      if (res.ok) sent++; else skipped++;
+      if (res.ok) {
+        sent++;
+        // Le recalcul peut deplacer `ts_start` (l'historique rejoue ne compte plus), donc la date de
+        // la fiche, donc son chemin. Sans ce menage, l'ancienne survit et la session compte double.
+        if (card.date && card.date !== s.date) {
+          try { gs('rm', `gs://${bucket}/cards/${user}/${s.date}_${s.sid}.json`); } catch { /* deja partie */ }
+        }
+      } else skipped++;
     }
   } catch (e) {
     console.log(`  ${s.sid.slice(0, 8)} echec : ${e.message}`);

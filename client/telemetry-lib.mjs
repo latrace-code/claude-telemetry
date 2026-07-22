@@ -228,12 +228,18 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
   // Session courante : sert a ecarter les messages rejoues d'une conversation dont celle-ci est issue.
   const ownSid = meta.sid || null;
   let inheritedEvents = 0;
+  // Identifiant du FIL, pas de la session : l'uuid du tout premier message du transcript. Deux
+  // sessions issues d'une meme conversation le partagent, ce qui permet de les recoller meme quand
+  // Claude Code reetiquette les messages rejoues au `sessionId` de la nouvelle session (mesure : 4
+  // transcripts partageant 97 a 98 % de leurs messages, tous etiquetes a leur propre sid).
+  let chainId = null;
   // Surface qui a produit la session (`cli`, `sdk-cli` pour un agent headless, et les valeurs
   // propres aux autres clients). Sans ce champ on ne peut que supposer qui travaille dans quoi,
   // alors que l'equipe est repartie entre CLI et application.
   let entrypoint = null;
 
   for (const e of events) {
+    if (!chainId && e && typeof e.uuid === 'string') chainId = e.uuid;
     if (!entrypoint && e && typeof e.entrypoint === 'string') entrypoint = e.entrypoint.slice(0, 40);
 
     // Reprise de conversation : le transcript de la nouvelle session REJOUE tout l'historique de
@@ -375,6 +381,7 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     // Messages rejoues d'une session anterieure, ecartes du comptage. > 0 = cette session est la
     // reprise d'un fil precedent, et son travail propre est ce qui reste.
     inherited_events: inheritedEvents,
+    chain_id: chainId,
     // false = les signaux de friction sont à null, en attente de judge-fiches.mjs. Un consommateur
     // qui lit signals.friction sans regarder `judged` lira null et doit le traiter comme "inconnu",
     // jamais comme zéro.

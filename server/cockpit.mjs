@@ -87,11 +87,38 @@ function stackedChart(days, users, colorOf) {
     </div>`;
 }
 
-export function renderCockpit(allCards, { days: windowDays = 30, generatedAt = '', user: selected = '', bots = false } = {}) {
+// Reprendre une conversation cree une nouvelle session dont le transcript rejoue l'historique.
+// Deux formes existent, et elles n'appellent pas le meme traitement :
+//   - le rejeu garde le `sessionId` d'origine : le capteur l'a deja ecarte (`inherited_events` > 0),
+//     les fiches du fil sont donc disjointes et doivent TOUTES etre comptees ;
+//   - le rejeu est reetiquete au sid de la nouvelle session : le capteur ne peut rien voir, et les
+//     fiches se recouvrent a 97-98 %. Mesure sur un poste reel : 4 fiches pour une seule
+//     conversation. Dans ce cas on ne garde que la plus complete.
+// `chain_id` (l'uuid du premier message) identifie le fil dans les deux cas.
+function foldChains(cards) {
+  const byChain = new Map();
+  const out = [];
+  for (const c of cards) {
+    if (!c.chain_id) { out.push(c); continue; }
+    if (!byChain.has(c.chain_id)) byChain.set(c.chain_id, []);
+    byChain.get(c.chain_id).push(c);
+  }
+  let folded = 0;
+  for (const group of byChain.values()) {
+    if (group.length === 1 || group.some(c => (c.inherited_events || 0) > 0)) { out.push(...group); continue; }
+    const weight = c => (c.tools_total || 0) + (c.user_prompts || 0);
+    out.push(group.reduce((a, b) => (weight(b) > weight(a) ? b : a)));
+    folded += group.length - 1;
+  }
+  return { cards: out, folded };
+}
+
+export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '', user: selected = '', bots = false } = {}) {
   // Les boucles automatiques (juge de friction, mineur nocturne, digest du soir) ne sont pas du
   // travail humain : elles n'ont ni relance ni friction, durent 0 minute, et sur un poste qui en
   // fait tourner beaucoup elles NOIENT les vraies sessions. Ecartees par defaut, jamais jetees :
   // leur cout est reel et reste affiche a part.
+  const { cards: allCards, folded } = foldChains(rawCards);
   const botCards = allCards.filter(c => c.automated);
   const humanCards = allCards.filter(c => !c.automated);
   const pool = bots ? allCards : humanCards;
@@ -203,6 +230,7 @@ export function renderCockpit(allCards, { days: windowDays = 30, generatedAt = '
     ${tile('Appels d\'outils', nf(totals.tools), `${errRate.toFixed(1)} % d'erreurs`)}
     ${tile('Tokens produits', nf(totals.tokens), `${nf(totals.agents)} agents`)}
   </div>
+  ${folded ? `<p class="note">${nf(folded)} session(s) repliee(s) : ce sont des reprises d'une meme conversation, dont le transcript rejoue l'historique. Sans ce repli, le meme travail serait compte plusieurs fois.</p>` : ''}
   ${botTotals.sessions ? `<p class="note">${nf(botTotals.sessions)} sessions automatiques (boucles d'amelioration, juge, digest) exclues de ces chiffres. Leur cout : ${nf(botTotals.tokens)} tokens, ${hoursLabel(botTotals.active)}. <a href="${q(selected)}${bots ? '' : '&bots=1'}" class="ulink">${bots ? 'les masquer' : 'les afficher'}</a>.</p>` : ''}
 </section>
 
