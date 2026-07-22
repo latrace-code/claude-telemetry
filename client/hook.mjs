@@ -90,7 +90,12 @@ function main() {
     attempts: 0,
   }));
 
-  detachUploader(['--drain']);
+  // `--rescan` ici AUSSI, pas seulement au demarrage : quelqu'un qui installe le plugin pendant une
+  // session en cours n'a pas eu de SessionStart avec le capteur actif, et son historique resterait
+  // invisible jusqu'a ce qu'il relance Claude Code. Vu le 22/07 sur la premiere installation.
+  // Le cout est nul en regime normal : le rescan ne fait qu'un parcours de repertoire quand il n'y
+  // a rien a rattraper, et il tourne dans le process detache.
+  detachUploader(['--drain', '--rescan']);
   process.exit(0);
 }
 
