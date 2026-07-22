@@ -29,7 +29,7 @@ function aggregate(cards) {
     const active = c.active_min || 0;
     const fr = (c.signals && c.signals.friction) || 0;
 
-    if (!byUser.has(u)) byUser.set(u, { user: u, sessions: 0, active: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, projects: new Set(), surfaces: new Set() });
+    if (!byUser.has(u)) byUser.set(u, { user: u, sessions: 0, active: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, projects: new Set(), surfaces: new Set(), scoped: false });
     const U = byUser.get(u);
     U.sessions++; U.active += active; U.prompts += c.user_prompts || 0; U.frictions += fr;
     U.tools += c.tools_total_all ?? c.tools_total ?? 0;
@@ -38,6 +38,7 @@ function aggregate(cards) {
     U.agents += c.agents_total || 0;
     if (c.project) U.projects.add(c.project);
     if (c.entrypoint) U.surfaces.add(c.entrypoint);
+    if (c.scoped) U.scoped = true;
 
     if (!byDay.has(d)) byDay.set(d, { date: d, users: new Map(), total: 0 });
     const D = byDay.get(d);
@@ -178,6 +179,8 @@ export function renderCockpit(allCards, { days: windowDays = 30, generatedAt = '
   .fr-m{font-size:11px;color:var(--muted);margin-bottom:2px}
   .empty{color:var(--muted);font-size:13px;margin:0}
   .note{color:var(--muted);font-size:12px;margin:16px 0 0;padding-top:14px;border-top:1px solid var(--grid)}
+  .scoped{display:inline-block;margin-left:8px;font-size:10px;color:var(--muted);border:1px solid var(--ring);
+    border-radius:999px;padding:1px 7px;vertical-align:1px;white-space:nowrap}
   .scroll{overflow-x:auto}
   #tip{position:fixed;pointer-events:none;opacity:0;transition:opacity .1s;background:var(--ink);color:var(--plane);
     font-size:12px;padding:5px 9px;border-radius:6px;white-space:nowrap;z-index:9;transform:translate(-50%,-140%)}
@@ -214,7 +217,7 @@ export function renderCockpit(allCards, { days: windowDays = 30, generatedAt = '
     <tr><th>Poste</th><th class="num">Sessions</th><th class="num">Temps actif</th><th class="num">Relances</th>
       <th class="num">Frictions</th><th class="num">Outils</th><th class="num">Erreurs</th><th class="num">Tokens</th><th>Surface</th><th>Projets</th></tr>
     ${users.map(u => `<tr>
-      <td><span class="who"><i style="background:var(--s${colorOf.get(u.user) ?? 0})"></i><a class="ulink" href="?days=${windowDays}&user=${encodeURIComponent(u.user)}">${esc(u.user)}</a></span></td>
+      <td><span class="who"><i style="background:var(--s${colorOf.get(u.user) ?? 0})"></i><a class="ulink" href="?days=${windowDays}&user=${encodeURIComponent(u.user)}">${esc(u.user)}</a></span>${u.scoped ? '<span class="scoped" title="Ce poste ne remonte qu\'une partie de ses sessions (perimetre restreint)">perimetre restreint</span>' : ''}</td>
       <td class="num">${nf(u.sessions)}</td>
       <td class="num">${hoursLabel(u.active)}</td>
       <td class="num">${nf(u.prompts)}</td>

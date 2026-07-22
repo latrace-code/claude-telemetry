@@ -56,3 +56,10 @@ export function projectAllowed(subject, cfg) {
     return pe && (s === pe || s.startsWith(pe + '-'));
   });
 }
+
+// Le poste restreint-il son perimetre ? Sert uniquement a marquer la fiche : un poste filtre doit
+// etre lisible comme tel, pas confondu avec un poste inactif.
+export function scopeActive(cfg) {
+  return !!(cfg && Array.isArray(cfg.include_projects)
+    && cfg.include_projects.some(s => typeof s === 'string' && s.trim()));
+}

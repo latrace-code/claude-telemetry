@@ -16,7 +16,7 @@ import { basename, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { analyzeTranscript, readEvents, scanSidechains } from './telemetry-lib.mjs';
-import { STATE_DIR, QUEUE_DIR, loadConfig, projectAllowed } from './paths.mjs';
+import { STATE_DIR, QUEUE_DIR, loadConfig, projectAllowed, scopeActive } from './paths.mjs';
 
 // Mesure : 5,1 s pour les 336 Mo d'une nuit orchestree. Au-dela du budget la fiche sort
 // `partial:true` ; le serveur garde le transcript complet, donc rien n'est perdu.
@@ -82,6 +82,10 @@ function main() {
   card.host = hostname();
   card.platform = process.platform;
   card.client_version = cfg.version || null;
+  // Un poste qui restreint son perimetre (include_projects) ne montre qu'une partie de son travail.
+  // Sans ce temoin, il serait indistinguable d'un poste peu actif : la mesure deviendrait
+  // declarative sans que personne ne le voie. Le detail des chemins ne remonte pas, seul le fait.
+  card.scoped = scopeActive(cfg);
 
   mkdirSync(QUEUE_DIR, { recursive: true });
   writeFileSync(join(QUEUE_DIR, `${sid}.json`), JSON.stringify({

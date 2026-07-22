@@ -14,7 +14,7 @@ import { join, basename, dirname } from 'node:path';
 import { createGzip } from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import { analyzeTranscript, readEvents, scanSidechains } from './telemetry-lib.mjs';
-import { STATE_DIR, QUEUE_DIR, SENT_FILE, LOCK_FILE, PROJECTS_DIR, loadConfig, projectAllowed } from './paths.mjs';
+import { STATE_DIR, QUEUE_DIR, SENT_FILE, LOCK_FILE, PROJECTS_DIR, loadConfig, projectAllowed, scopeActive } from './paths.mjs';
 
 const LOCK_TTL_MS = 15 * 60 * 1000;
 const RESCAN_WINDOW_MS = 7 * 24 * 3600 * 1000;
@@ -210,6 +210,7 @@ function rescan() {
       card.host = hostname();
       card.platform = process.platform;
       card.client_version = cfg.version || null;
+      card.scoped = scopeActive(cfg);
       card.recovered = true;
       mkdirSync(QUEUE_DIR, { recursive: true });
       writeFileSync(join(QUEUE_DIR, `${c.sid}.json`), JSON.stringify({
