@@ -10,11 +10,11 @@
 import * as fs from 'node:fs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, rmSync, createReadStream, createWriteStream } from 'node:fs';
 import { hostname, userInfo } from 'node:os';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import { createGzip } from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import { analyzeTranscript, readEvents, scanSidechains } from './telemetry-lib.mjs';
-import { STATE_DIR, QUEUE_DIR, SENT_FILE, LOCK_FILE, PROJECTS_DIR, loadConfig } from './paths.mjs';
+import { STATE_DIR, QUEUE_DIR, SENT_FILE, LOCK_FILE, PROJECTS_DIR, loadConfig, projectAllowed } from './paths.mjs';
 
 const LOCK_TTL_MS = 15 * 60 * 1000;
 const RESCAN_WINDOW_MS = 7 * 24 * 3600 * 1000;
@@ -141,6 +141,9 @@ async function drain() {
     const p = join(QUEUE_DIR, n);
     const item = readJson(p, null);
     if (!item || !item.card) { try { unlinkSync(p); } catch {} continue; }
+    // Filet : un item hors perimetre (enfile avant l'activation de l'allowlist, ou par une version
+    // anterieure du capteur) est retire de la file sans etre envoye.
+    if (!projectAllowed(basename(dirname(item.transcript_path || '')), cfg)) { try { unlinkSync(p); } catch {} continue; }
     try {
       await sendOne(item);
       markSent(item.card.sid);
@@ -176,6 +179,7 @@ function rescan() {
   let projects = [];
   try { projects = readdirSync(PROJECTS_DIR); } catch { return; }
   for (const proj of projects) {
+    if (!projectAllowed(proj, cfg)) continue;   // hors perimetre : pas de rattrapage
     const dir = join(PROJECTS_DIR, proj);
     let names = [];
     try { names = readdirSync(dir).filter(n => n.endsWith('.jsonl')); } catch { continue; }
