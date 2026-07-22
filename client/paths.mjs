@@ -44,15 +44,35 @@ export function encodeProjectDir(p) {
 // `subject` : soit un cwd reel (hook, SessionEnd), soit un nom de dossier deja encode (uploader,
 // rescan). On compare en forme encodee pour n'avoir qu'une seule liste lisible cote config. Le tiret
 // final du prefixe evite qu'un dossier "LaTrace" avale un voisin "LaTraceStuff".
+// Deux erreurs de saisie faisaient echouer le filtre EN SILENCE, et dans le sens dangereux : plus
+// rien ne remontait, sans que personne ne puisse s'en apercevoir.
+//   1. `~/Developer/LaTrace` : le tilde n'etait pas resolu, donc ne correspondait a aucun cwd reel.
+//   2. La casse : macOS et Windows ont un systeme de fichiers insensible a la casse, donc un chemin
+//      correct au caractere pres mais pas a la casse pres est parfaitement legitime la-bas.
+// On aligne la comparaison sur le systeme de fichiers : insensible sur darwin/win32, sensible sur
+// Linux, ou deux dossiers ne differant que par la casse sont bien deux dossiers differents.
+const CASE_INSENSITIVE_FS = process.platform === 'darwin' || process.platform === 'win32';
+
+function expandHome(p) {
+  if (p === '~') return HOME;
+  if (p.startsWith('~/') || p.startsWith('~\\')) return join(HOME, p.slice(2));
+  return p;
+}
+
+function normalizeForCompare(p) {
+  const s = encodeProjectDir(expandHome(String(p).trim()).replace(/[/\\]+$/, ''));
+  return CASE_INSENSITIVE_FS ? s.toLowerCase() : s;
+}
+
 export function projectAllowed(subject, cfg) {
   const inc = cfg && Array.isArray(cfg.include_projects)
     ? cfg.include_projects.filter(s => typeof s === 'string' && s.trim())
     : [];
   if (!inc.length) return true;                       // pas d'allowlist -> on ne filtre rien
   if (typeof subject !== 'string' || !subject) return false;
-  const s = encodeProjectDir(subject.replace(/[/\\]+$/, ''));
+  const s = normalizeForCompare(subject);
   return inc.some(pref => {
-    const pe = encodeProjectDir(pref.trim().replace(/[/\\]+$/, ''));
+    const pe = normalizeForCompare(pref);
     return pe && (s === pe || s.startsWith(pe + '-'));
   });
 }

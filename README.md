@@ -54,6 +54,11 @@ Liste de préfixes de chemins réels. Une session n'est captée que si son dossi
 d'eux ou un sous-dossier (worktrees inclus). Tout le reste - autres projets, dossiers perso - n'est ni
 calculé, ni mis en file, ni rattrapé au bootstrap.
 
+Le chemin doit être **absolu** (`~` est accepté et résolu). Un chemin relatif ne correspondra à rien
+et, l'allowlist étant stricte, **plus aucune session ne remonterait** : c'est le seul mode d'échec
+silencieux de cette option. La comparaison suit le système de fichiers, insensible à la casse sur
+macOS et Windows, sensible sur Linux.
+
 - **Liste absente ou vide** : comportement historique, tout remonte. Un poste qui ne configure rien
   n'est pas affecté.
 - **Allowlist stricte** : par défaut rien ne part, seul ce qui matche est envoyé. Un dossier oublié
