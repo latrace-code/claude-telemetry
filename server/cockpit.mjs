@@ -85,13 +85,22 @@ function stackedChart(days, users, colorOf) {
     </div>`;
 }
 
-export function renderCockpit(allCards, { days: windowDays = 30, generatedAt = '', user: selected = '' } = {}) {
+export function renderCockpit(allCards, { days: windowDays = 30, generatedAt = '', user: selected = '', bots = false } = {}) {
+  // Les boucles automatiques (juge de friction, mineur nocturne, digest du soir) ne sont pas du
+  // travail humain : elles n'ont ni relance ni friction, durent 0 minute, et sur un poste qui en
+  // fait tourner beaucoup elles NOIENT les vraies sessions. Ecartees par defaut, jamais jetees :
+  // leur cout est reel et reste affiche a part.
+  const botCards = allCards.filter(c => c.automated);
+  const humanCards = allCards.filter(c => !c.automated);
+  const pool = bots ? allCards : humanCards;
+
   // Les couleurs sont assignees sur la population COMPLETE : filtrer sur une personne ne doit pas
   // repeindre les autres d'une vue a l'autre (la couleur suit l'entite, jamais son rang).
   const colorOf = new Map(aggregate(allCards).users.map((u, i) => [u.user, i % 5]));
   const everyone = [...colorOf.keys()];
-  const cards = selected ? allCards.filter(c => c.user === selected) : allCards;
+  const cards = selected ? pool.filter(c => c.user === selected) : pool;
   const { users, days, totals } = aggregate(cards);
+  const botTotals = aggregate(selected ? botCards.filter(c => c.user === selected) : botCards).totals;
   const errRate = totals.tools ? (totals.errors / totals.tools) * 100 : 0;
 
   const recent = [...cards].sort((a, b) => String(b.ts_start).localeCompare(String(a.ts_start))).slice(0, 60);
@@ -101,11 +110,12 @@ export function renderCockpit(allCards, { days: windowDays = 30, generatedAt = '
     .slice(0, 25);
 
   const q = u => `?days=${windowDays}${u ? '&user=' + encodeURIComponent(u) : ''}`;
+  const keepBots = bots ? '&bots=1' : '';
   const rangeLinks = [7, 30, 90].map(d =>
-    `<a class="range${d === windowDays ? ' on' : ''}" href="?days=${d}${selected ? '&user=' + encodeURIComponent(selected) : ''}">${d} j</a>`).join('');
+    `<a class="range${d === windowDays ? ' on' : ''}" href="?days=${d}${selected ? '&user=' + encodeURIComponent(selected) : ''}${keepBots}">${d} j</a>`).join('');
   const userLinks = everyone.length > 1
-    ? `<div class="ranges"><a class="range${selected ? '' : ' on'}" href="${q('')}">Tous</a>` +
-      everyone.map(u => `<a class="range${selected === u ? ' on' : ''}" href="${q(u)}"><i class="dot" style="background:var(--s${colorOf.get(u)})"></i>${esc(u)}</a>`).join('') + '</div>'
+    ? `<div class="ranges"><a class="range${selected ? '' : ' on'}" href="${q('') + keepBots}">Tous</a>` +
+      everyone.map(u => `<a class="range${selected === u ? ' on' : ''}" href="${q(u) + keepBots}"><i class="dot" style="background:var(--s${colorOf.get(u)})"></i>${esc(u)}</a>`).join('') + '</div>'
     : '';
 
   return `<!doctype html>
@@ -166,6 +176,7 @@ export function renderCockpit(allCards, { days: windowDays = 30, generatedAt = '
   .fr{border-left:2px solid var(--crit);padding:2px 0 2px 12px;margin-bottom:14px}
   .fr-m{font-size:11px;color:var(--muted);margin-bottom:2px}
   .empty{color:var(--muted);font-size:13px;margin:0}
+  .note{color:var(--muted);font-size:12px;margin:16px 0 0;padding-top:14px;border-top:1px solid var(--grid)}
   .scroll{overflow-x:auto}
   #tip{position:fixed;pointer-events:none;opacity:0;transition:opacity .1s;background:var(--ink);color:var(--plane);
     font-size:12px;padding:5px 9px;border-radius:6px;white-space:nowrap;z-index:9;transform:translate(-50%,-140%)}
@@ -188,6 +199,7 @@ export function renderCockpit(allCards, { days: windowDays = 30, generatedAt = '
     ${tile('Appels d\'outils', nf(totals.tools), `${errRate.toFixed(1)} % d'erreurs`)}
     ${tile('Tokens produits', nf(totals.tokens), `${nf(totals.agents)} agents`)}
   </div>
+  ${botTotals.sessions ? `<p class="note">${nf(botTotals.sessions)} sessions automatiques (boucles d'amelioration, juge, digest) exclues de ces chiffres. Leur cout : ${nf(botTotals.tokens)} tokens, ${hoursLabel(botTotals.active)}. <a href="${q(selected)}${bots ? '' : '&bots=1'}" class="ulink">${bots ? 'les masquer' : 'les afficher'}</a>.</p>` : ''}
 </section>
 
 <section>

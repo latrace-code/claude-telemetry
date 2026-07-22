@@ -45,6 +45,10 @@ const RE_NOT_HUMAN = [
   /^voici le journal brut de la journée/i,
   /^tu analyses les frictions émises/i,
   /^tu analyses des messages écrits par lucas/i, // prompt du juge de friction (judge.mjs)
+  // Variante avec un compte en tete ("Tu analyses 135 frictions entre Lucas et son IA..."), emise
+  // par autonomous-friction. Sans elle, ces sessions passaient pour du travail humain et venaient
+  // polluer le cockpit d'equipe : 6 lignes vues en prod le 22/07. Motif volontairement etroit.
+  /^tu analyses \d+ frictions? entre lucas/i,
   /^tu classes des messages de friction/i,       // prompt de categorize.mjs
   /^<command-(name|message|args)>/i,
   /^\[Image #\d+\]$/i,
