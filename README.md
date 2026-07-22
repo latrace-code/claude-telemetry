@@ -17,13 +17,20 @@ Le client **lit** ce que Claude Code a déjà écrit sur le disque, calcule la f
 ## Installation (poste Mac ou Windows)
 
 ```
-/plugin marketplace add latrace-code/claude-telemetry
+/plugin marketplace add https://github.com/latrace-code/claude-telemetry.git
 /plugin install latrace-telemetry@latrace
 ```
 
-Une fois, puis plus rien : le plugin se met à jour tout seul depuis ce repo.
+Puis, dans un terminal, l'adresse et la clé du service (elles ne sont pas dans ce dépôt, qui est public) :
 
-Prérequis : `node` disponible dans le PATH.
+```bash
+mkdir -p ~/.latrace-telemetry && printf '%s\n' '{"endpoint":"<url>","token":"<jeton>","user":"<prenom>"}' > ~/.latrace-telemetry/config.json
+```
+
+Une fois, puis plus rien : le plugin se met à jour tout seul depuis ce dépôt, à chaque commit.
+
+Prérequis : `node` dans le PATH. Aucun compte GitHub requis (dépôt public, clone HTTPS anonyme,
+vérifié sur une machine sans clé SSH ni credentials).
 
 Pour couper le capteur : `LATRACE_TELEMETRY_OFF=1`, ou `{"enabled": false}` dans
 `~/.latrace-telemetry/config.json`.
