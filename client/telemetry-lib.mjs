@@ -232,7 +232,13 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     if (ts !== null) {
       if (start === null || ts < start) start = ts;
       if (end === null || ts > end) end = ts;
-      if (prevTs !== null) {
+      // Un transcript n'est PAS toujours chronologique : une reprise de conversation, un fork ou une
+      // compaction réinjectent des messages plus anciens. Le gap devient négatif et, comme il passait
+      // le test `d < ACTIVE_GAP_MS`, il était SOUSTRAIT du temps actif. Mesuré sur une session réelle :
+      // 6 sauts en arrière sur 933 events (0,6 % des transitions) suffisaient à retirer 71 heures et à
+      // afficher -4 201 min pour 83 min de travail réel. On ignore donc les reculs, et prevTs ne
+      // redescend jamais : sinon le gap suivant, artificiellement énorme, partirait en "dormant".
+      if (prevTs !== null && ts >= prevTs) {
         const d = ts - prevTs;
         if (d < ACTIVE_GAP_MS) {
           produceMs += d;
@@ -240,7 +246,7 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
         } else if (d < DORMANT_GAP_MS) { waitMs += d; nWaits++; }
         else { dormantMs += d; nDormant++; }
       }
-      prevTs = ts;
+      if (prevTs === null || ts > prevTs) prevTs = ts;
     }
     if (e && typeof e.gitBranch === 'string' && e.gitBranch) branch = e.gitBranch;
     const m = e && e.message;
