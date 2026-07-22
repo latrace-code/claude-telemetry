@@ -1,15 +1,30 @@
 // Ingestion de la telemetrie d'iteration IA (Cloud Run, scale a zero).
 //
-// Ecriture seule et deliberement : aucune route ne rend de donnee. Les fiches et les transcripts
-// contiennent le travail reel de l'equipe (contenu de fichiers lus, sorties de commandes, donc
-// potentiellement des credentials). La lecture passe par les acces IAM du bucket, jamais par HTTP.
+// Deux surfaces, volontairement asymetriques :
+//   - ingestion (POST /v1/*)  : token Bearer partage par les postes.
+//   - cockpit  (GET /v1/cockpit) : Basic auth, et il ne lit QUE les fiches.
+// Les TRANSCRIPTS ne sont servis par aucune route. Ils contiennent le contenu des fichiers ouverts
+// et la sortie des commandes executees, donc potentiellement des credentials : leur seule voie de
+// lecture est IAM sur le bucket, jamais HTTP.
 
 import { createServer } from 'node:http';
 import { Storage } from '@google-cloud/storage';
+import { renderCockpit } from './cockpit.mjs';
 
 const PORT = process.env.PORT || 8080;
 const BUCKET = process.env.BUCKET;
 const TOKEN = process.env.INGEST_TOKEN;
+const COCKPIT_USER = process.env.COCKPIT_USER || 'latrace';
+const COCKPIT_PASS = process.env.COCKPIT_PASS;
+const COCKPIT_CACHE_MS = 60 * 1000;
+
+// Le poste envoie son nom d'utilisateur systeme, qui n'est pas toujours le prenom de la personne
+// (`waroth` = Lucas). La table vit ici et pas sur les postes : corriger une identite ne doit pas
+// demander de toucher a la machine de quelqu'un.
+const USER_ALIASES = (() => {
+  try { return JSON.parse(process.env.USER_ALIASES || '{}'); } catch { return {}; }
+})();
+const normUser = u => USER_ALIASES[u] || u;
 const SIGN_TTL_MS = 15 * 60 * 1000;
 const MAX_FILES = 500;
 const MAX_BODY = 4 * 1024 * 1024;
@@ -68,7 +83,8 @@ async function handleSession(req, res) {
   const body = await readBody(req);
   const card = body && body.card;
   if (!card || typeof card !== 'object') return fail(res, 400, 'missing card');
-  const user = safeId(card.user) || 'unknown';
+  const user = normUser(safeId(card.user) || 'unknown');
+  card.user = user;
   const sid = safeId(card.sid);
   const date = SAFE_DATE.test(card.date || '') ? card.date : new Date().toISOString().slice(0, 10);
   if (!sid) return fail(res, 400, 'invalid sid');
@@ -83,7 +99,7 @@ async function handleSession(req, res) {
 
 async function handleSign(req, res) {
   const body = await readBody(req);
-  const user = safeId(body.user) || 'unknown';
+  const user = normUser(safeId(body.user) || 'unknown');
   const sid = safeId(body.sid);
   const date = SAFE_DATE.test(body.date || '') ? body.date : new Date().toISOString().slice(0, 10);
   const files = Array.isArray(body.files) ? body.files.slice(0, MAX_FILES) : [];
@@ -104,11 +120,65 @@ async function handleSign(req, res) {
   ok(res, { urls });
 }
 
+// Lecture des fiches pour le cockpit. Le nom d'objet porte la date (`cards/<user>/<date>_<sid>.json`),
+// donc la fenetre se filtre sur le nom : on ne telecharge que ce qu'on affiche.
+let cockpitCache = { key: '', at: 0, html: '' };
+
+async function loadCards(sinceDate) {
+  const [files] = await storage.bucket(BUCKET).getFiles({ prefix: 'cards/' });
+  const wanted = files.filter(f => {
+    const base = f.name.slice(f.name.lastIndexOf('/') + 1);
+    return base.endsWith('.json') && base.slice(0, 10) >= sinceDate;
+  });
+  const out = [];
+  const CONCURRENCY = 24;
+  for (let i = 0; i < wanted.length; i += CONCURRENCY) {
+    const batch = await Promise.all(wanted.slice(i, i + CONCURRENCY).map(async f => {
+      try {
+        const c = JSON.parse((await f.download())[0].toString('utf8'));
+        c.user = normUser(c.user);
+        return c;
+      } catch { return null; }
+    }));
+    for (const c of batch) if (c) out.push(c);
+  }
+  return out;
+}
+
+async function handleCockpit(req, res, url) {
+  const days = Math.min(365, Math.max(1, parseInt(url.searchParams.get('days') || '30', 10) || 30));
+  const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const key = `d${days}`;
+  if (cockpitCache.key === key && Date.now() - cockpitCache.at < COCKPIT_CACHE_MS) {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    return res.end(cockpitCache.html);
+  }
+  const cards = await loadCards(since);
+  const html = renderCockpit(cards, { days, generatedAt: new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC' });
+  cockpitCache = { key, at: Date.now(), html };
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  res.end(html);
+}
+
+function cockpitAuthed(req) {
+  const h = req.headers.authorization || '';
+  if (!COCKPIT_PASS || !h.startsWith('Basic ')) return false;
+  const [u, p] = Buffer.from(h.slice(6), 'base64').toString('utf8').split(':');
+  return u === COCKPIT_USER && p === COCKPIT_PASS;
+}
+
 createServer(async (req, res) => {
   try {
     // Sous /v1/ et pas a la racine : sur ce projet, le frontend Google intercepte `/` et `/healthz`
     // et rend son propre 404 sans que la requete n'atteigne le conteneur (verifie, zero log).
     if (req.method === 'GET' && req.url === '/v1/healthz') return ok(res, { ok: true });
+    if (req.method === 'GET' && req.url.startsWith('/v1/cockpit')) {
+      if (!cockpitAuthed(req)) {
+        res.writeHead(401, { 'www-authenticate': 'Basic realm="telemetrie", charset="UTF-8"' });
+        return res.end('auth requise');
+      }
+      return await handleCockpit(req, res, new URL(req.url, 'http://x'));
+    }
     if (req.method !== 'POST') return fail(res, 404, 'not found');
     if (!authed(req)) return fail(res, 401, 'unauthorized');
     if (req.url === '/v1/sessions') return await handleSession(req, res);
