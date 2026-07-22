@@ -221,8 +221,13 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
   let openFriction = null;
 
   const brainAcc = newBrainAcc();
+  // Surface qui a produit la session (`cli`, `sdk-cli` pour un agent headless, et les valeurs
+  // propres aux autres clients). Sans ce champ on ne peut que supposer qui travaille dans quoi,
+  // alors que l'equipe est repartie entre CLI et application.
+  let entrypoint = null;
 
   for (const e of events) {
+    if (!entrypoint && e && typeof e.entrypoint === 'string') entrypoint = e.entrypoint.slice(0, 40);
     const ts = parseTs(e && e.timestamp);
     if (ts !== null) {
       if (start === null || ts < start) start = ts;
@@ -343,6 +348,7 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     // [{text, turns, min, famille}] : coût de résolution imputé à chaque friction (jusqu'au prompt humain suivant).
     friction_prompts: frictionPrompts.map(f => ({ text: f.text, turns: f.turns, min: toMin(f.ms), famille: f.famille })),
     subject: subject || fallbackSubject,
+    entrypoint,
     // false = les signaux de friction sont à null, en attente de judge-fiches.mjs. Un consommateur
     // qui lit signals.friction sans regarder `judged` lira null et doit le traiter comme "inconnu",
     // jamais comme zéro.

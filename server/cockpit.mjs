@@ -29,7 +29,7 @@ function aggregate(cards) {
     const active = c.active_min || 0;
     const fr = (c.signals && c.signals.friction) || 0;
 
-    if (!byUser.has(u)) byUser.set(u, { user: u, sessions: 0, active: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, projects: new Set() });
+    if (!byUser.has(u)) byUser.set(u, { user: u, sessions: 0, active: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, projects: new Set(), surfaces: new Set() });
     const U = byUser.get(u);
     U.sessions++; U.active += active; U.prompts += c.user_prompts || 0; U.frictions += fr;
     U.tools += c.tools_total_all ?? c.tools_total ?? 0;
@@ -37,6 +37,7 @@ function aggregate(cards) {
     U.tokens += c.tokens_out_all ?? c.tokens_out ?? 0;
     U.agents += c.agents_total || 0;
     if (c.project) U.projects.add(c.project);
+    if (c.entrypoint) U.surfaces.add(c.entrypoint);
 
     if (!byDay.has(d)) byDay.set(d, { date: d, users: new Map(), total: 0 });
     const D = byDay.get(d);
@@ -211,7 +212,7 @@ export function renderCockpit(allCards, { days: windowDays = 30, generatedAt = '
   <h2>Par poste</h2>
   <div class="scroll"><table>
     <tr><th>Poste</th><th class="num">Sessions</th><th class="num">Temps actif</th><th class="num">Relances</th>
-      <th class="num">Frictions</th><th class="num">Outils</th><th class="num">Erreurs</th><th class="num">Tokens</th><th>Projets</th></tr>
+      <th class="num">Frictions</th><th class="num">Outils</th><th class="num">Erreurs</th><th class="num">Tokens</th><th>Surface</th><th>Projets</th></tr>
     ${users.map(u => `<tr>
       <td><span class="who"><i style="background:var(--s${colorOf.get(u.user) ?? 0})"></i><a class="ulink" href="?days=${windowDays}&user=${encodeURIComponent(u.user)}">${esc(u.user)}</a></span></td>
       <td class="num">${nf(u.sessions)}</td>
@@ -221,6 +222,7 @@ export function renderCockpit(allCards, { days: windowDays = 30, generatedAt = '
       <td class="num">${nf(u.tools)}</td>
       <td class="num">${u.tools ? ((u.errors / u.tools) * 100).toFixed(1) + ' %' : '—'}</td>
       <td class="num">${nf(u.tokens)}</td>
+      <td class="tag">${esc([...u.surfaces].sort().join(', ') || '—')}</td>
       <td class="tag">${esc([...u.projects].slice(0, 3).join(', '))}</td></tr>`).join('')}
   </table></div>
 </section>
