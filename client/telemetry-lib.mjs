@@ -44,7 +44,11 @@ const RE_NOT_HUMAN = [
   /^approach this as the/i,
   /^voici le journal brut de la journée/i,
   /^tu analyses les frictions émises/i,
-  /^tu analyses des messages écrits par lucas/i, // prompt du juge de friction (judge.mjs)
+  // Prompt du juge de friction (judge.mjs). Le nom de l'auteur est devenu un PARAMÈTRE le 22/07
+  // (« ...écrits par Mathilde (product designer...) ») : un motif qui codait « lucas » en dur a cessé
+  // de matcher le jour même, et chaque appel du juge est reparu dans le cockpit comme du travail
+  // humain de Lucas. Le motif s'arrête donc avant le nom.
+  /^tu analyses des messages écrits par /i,
   // Variante avec un compte en tete ("Tu analyses 135 frictions entre Lucas et son IA..."), emise
   // par autonomous-friction. Sans elle, ces sessions passaient pour du travail humain et venaient
   // polluer le cockpit d'equipe : 6 lignes vues en prod le 22/07. Motif volontairement etroit.
