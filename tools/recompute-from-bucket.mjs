@@ -26,6 +26,7 @@ if (!user) { console.error('usage: --user <nom> [--dry]'); process.exit(1); }
 const cfg = JSON.parse(readFileSync(join(process.env.HOME, '.latrace-telemetry', 'config.json'), 'utf8'));
 
 const gs = (...a) => execFileSync('gcloud', ['storage', ...a], { encoding: 'utf8', maxBuffer: 1 << 28 });
+const pick = (o, keys) => Object.fromEntries(keys.filter(k => o && o[k] !== undefined).map(k => [k, o[k]]));
 
 const sessions = new Map();
 for (const line of gs('ls', '-r', `gs://${bucket}/transcripts/${user}/`).split('\n')) {
@@ -63,6 +64,17 @@ for (const s of sessions.values()) {
     try { old = JSON.parse(gs('cat', `gs://${bucket}/cards/${user}/${s.date}_${s.sid}.json`)); } catch { /* pas de fiche */ }
     for (const k of ['user', 'host', 'platform', 'project', 'client_version', 'scoped', 'recovered']) {
       if (old[k] !== undefined) card[k] = old[k];
+    }
+    // Le VERDICT de friction se reprend aussi. Il est produit ailleurs (juge haiku, machine d'audit)
+    // et cette passe ne sait pas le recalculer : sans ca, un recompute repose `judged:false` et efface
+    // en silence tout le travail du juge. Vu deux fois en une heure le 22/07, les deux passes tournant
+    // le meme jour sur les memes fiches. Le juge repassera de toute facon et rafraichira le verdict si
+    // les prompts ont bouge ; entre-temps, mieux vaut l'ancien verdict que pas de verdict du tout.
+    if (old.judged) {
+      card.signals = { ...card.signals, ...pick(old.signals, ['friction', 'correction', 'regression']) };
+      card.friction_prompts = old.friction_prompts || [];
+      card.judged = true;
+      card.judged_at = old.judged_at;
     }
     card.user = card.user || user;
     card.recomputed = true;
