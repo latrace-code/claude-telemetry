@@ -20,11 +20,18 @@ const LOCK_TTL_MS = 15 * 60 * 1000;
 const RESCAN_WINDOW_MS = 7 * 24 * 3600 * 1000;
 const RESCAN_SETTLE_MS = 30 * 60 * 1000;   // en deca, la session est peut-etre encore ouverte
 const RESCAN_MAX = 20;
+// Premier demarrage : on prend TOUT l'historique present sur la machine, sans fenetre. C'est la
+// seule occasion de le faire (Claude Code purge ses propres transcripts au bout d'un moment), et
+// c'est ce qui donne un point de comparaison AVANT installation. Etale sur plusieurs passages pour
+// ne pas saturer la connexion de quelqu'un le jour de son installation.
+const BOOTSTRAP_WINDOW_MS = 3650 * 24 * 3600 * 1000;
+const BOOTSTRAP_MAX = 60;
 const MAX_ATTEMPTS = 5;
 const HTTP_TIMEOUT_MS = 120 * 1000;
 
 const cfg = loadConfig();
 const TMP_DIR = join(STATE_DIR, 'tmp');
+const BOOTSTRAP_FLAG = join(STATE_DIR, 'bootstrapped');
 
 function readJson(p, fallback) { try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return fallback; } }
 
@@ -159,6 +166,13 @@ function rescan() {
   const now = Date.now();
   const candidates = [];
 
+  // Premier setup : tout ce que la machine porte encore. Claude Code purge ses propres transcripts
+  // au bout de `cleanupPeriodDays` (30 par defaut, verifie sur poste : rien au-dela de ~35 jours),
+  // donc "tout l'historique" veut dire le dernier mois, pas la vie entiere du poste.
+  const bootstrapping = !existsSync(BOOTSTRAP_FLAG);
+  const windowMs = bootstrapping ? BOOTSTRAP_WINDOW_MS : RESCAN_WINDOW_MS;
+  const maxItems = bootstrapping ? BOOTSTRAP_MAX : RESCAN_MAX;
+
   let projects = [];
   try { projects = readdirSync(PROJECTS_DIR); } catch { return; }
   for (const proj of projects) {
@@ -172,13 +186,13 @@ function rescan() {
       let st;
       try { st = statSync(abs); } catch { continue; }
       const age = now - st.mtimeMs;
-      if (age > RESCAN_WINDOW_MS || age < RESCAN_SETTLE_MS) continue;
+      if (age > windowMs || age < RESCAN_SETTLE_MS) continue;
       candidates.push({ sid, abs, proj, mtime: st.mtimeMs });
     }
   }
 
   candidates.sort((a, b) => b.mtime - a.mtime);
-  for (const c of candidates.slice(0, RESCAN_MAX)) {
+  for (const c of candidates.slice(0, maxItems)) {
     try {
       const events = readEvents(readFileSync, c.abs);
       const sessionDir = c.abs.replace(/\.jsonl$/, '');
@@ -199,6 +213,10 @@ function rescan() {
         queued_at: new Date().toISOString(), attempts: 0,
       }));
     } catch { /* transcript illisible, on passe */ }
+  }
+
+  if (bootstrapping && candidates.length <= maxItems) {
+    try { writeFileSync(BOOTSTRAP_FLAG, new Date().toISOString()); } catch { /* retente au prochain demarrage */ }
   }
 }
 

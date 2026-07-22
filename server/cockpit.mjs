@@ -60,24 +60,24 @@ function tile(label, value, sub) {
   return `<div class="tile"><div class="tile-l">${esc(label)}</div><div class="tile-v">${value}</div>${sub ? `<div class="tile-s">${esc(sub)}</div>` : ''}</div>`;
 }
 
-function stackedChart(days, users) {
+function stackedChart(days, users, colorOf) {
   if (!days.length) return '<p class="empty">Aucune session sur la periode.</p>';
   const max = Math.max(...days.map(d => d.total), 1);
   const order = users.map(u => u.user);
   const step = Math.ceil(days.length / 12);
 
   const cols = days.map((d, i) => {
-    const segs = order.map((u, si) => {
+    const segs = order.map(u => {
       const v = d.users.get(u) || 0;
       if (!v) return '';
       const h = (v / max) * 100;
-      return `<div class="seg" style="height:${h.toFixed(2)}%;background:var(--s${si % 5})" data-tip="${esc(u)} · ${esc(hoursLabel(v))}"></div>`;
+      return `<div class="seg" style="height:${h.toFixed(2)}%;background:var(--s${colorOf.get(u) ?? 0})" data-tip="${esc(u)} · ${esc(hoursLabel(v))}"></div>`;
     }).join('');
     const label = i % step === 0 ? d.date.slice(8) + '/' + d.date.slice(5, 7) : '';
     return `<div class="col"><div class="stack" data-tip="${esc(d.date)} · ${esc(hoursLabel(d.total))}">${segs}</div><div class="xlab">${label}</div></div>`;
   }).join('');
 
-  const legend = users.map((u, i) => `<span class="lg"><i style="background:var(--s${i % 5})"></i>${esc(u.user)}</span>`).join('');
+  const legend = users.map(u => `<span class="lg"><i style="background:var(--s${colorOf.get(u.user) ?? 0})"></i>${esc(u.user)}</span>`).join('');
   return `<div class="legend">${legend}</div>
     <div class="chart" style="--max:${max}">
       <div class="ygrid"><span>${hoursLabel(max)}</span><span>${hoursLabel(max / 2)}</span><span>0</span></div>
@@ -85,7 +85,12 @@ function stackedChart(days, users) {
     </div>`;
 }
 
-export function renderCockpit(cards, { days: windowDays = 30, generatedAt = '' } = {}) {
+export function renderCockpit(allCards, { days: windowDays = 30, generatedAt = '', user: selected = '' } = {}) {
+  // Les couleurs sont assignees sur la population COMPLETE : filtrer sur une personne ne doit pas
+  // repeindre les autres d'une vue a l'autre (la couleur suit l'entite, jamais son rang).
+  const colorOf = new Map(aggregate(allCards).users.map((u, i) => [u.user, i % 5]));
+  const everyone = [...colorOf.keys()];
+  const cards = selected ? allCards.filter(c => c.user === selected) : allCards;
   const { users, days, totals } = aggregate(cards);
   const errRate = totals.tools ? (totals.errors / totals.tools) * 100 : 0;
 
@@ -95,8 +100,13 @@ export function renderCockpit(cards, { days: windowDays = 30, generatedAt = '' }
     .sort((a, b) => String(b.date).localeCompare(String(a.date)))
     .slice(0, 25);
 
+  const q = u => `?days=${windowDays}${u ? '&user=' + encodeURIComponent(u) : ''}`;
   const rangeLinks = [7, 30, 90].map(d =>
-    `<a class="range${d === windowDays ? ' on' : ''}" href="?days=${d}">${d} j</a>`).join('');
+    `<a class="range${d === windowDays ? ' on' : ''}" href="?days=${d}${selected ? '&user=' + encodeURIComponent(selected) : ''}">${d} j</a>`).join('');
+  const userLinks = everyone.length > 1
+    ? `<div class="ranges"><a class="range${selected ? '' : ' on'}" href="${q('')}">Tous</a>` +
+      everyone.map(u => `<a class="range${selected === u ? ' on' : ''}" href="${q(u)}"><i class="dot" style="background:var(--s${colorOf.get(u)})"></i>${esc(u)}</a>`).join('') + '</div>'
+    : '';
 
   return `<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -118,6 +128,10 @@ export function renderCockpit(cards, { days: windowDays = 30, generatedAt = '' }
   .ranges{display:flex;gap:6px}
   .range{padding:5px 12px;border:1px solid var(--ring);border-radius:999px;text-decoration:none;color:var(--ink2);font-size:13px;background:var(--surface)}
   .range.on{background:var(--ink);color:var(--plane);border-color:var(--ink)}
+  .range .dot{width:8px;height:8px;border-radius:3px;display:inline-block;margin-right:6px}
+  .filters{display:flex;flex-direction:column;gap:8px;align-items:flex-end}
+  .ulink{color:inherit;text-decoration:none;border-bottom:1px solid var(--ring)}
+  .ulink:hover{border-bottom-color:currentColor}
   section{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:20px;margin-bottom:18px}
   h2{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--ink2);margin:0 0 16px}
   .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
@@ -160,8 +174,8 @@ export function renderCockpit(cards, { days: windowDays = 30, generatedAt = '' }
 <body><div class="wrap">
 <header>
   <div><h1>Telemetrie d'iteration IA</h1>
-    <div class="sub">Comment l'equipe travaille avec Claude Code. ${nf(totals.sessions)} sessions sur ${windowDays} jours.</div></div>
-  <div class="ranges">${rangeLinks}</div>
+    <div class="sub">${selected ? esc(selected) + ' · ' : 'Comment l\'equipe travaille avec Claude Code. '}${nf(totals.sessions)} sessions sur ${windowDays} jours.</div></div>
+  <div class="filters">${userLinks}<div class="ranges">${rangeLinks}</div></div>
 </header>
 
 <section>
@@ -178,7 +192,7 @@ export function renderCockpit(cards, { days: windowDays = 30, generatedAt = '' }
 
 <section>
   <h2>Temps actif par jour</h2>
-  ${stackedChart(days, users)}
+  ${stackedChart(days, users, colorOf)}
 </section>
 
 <section>
@@ -186,8 +200,8 @@ export function renderCockpit(cards, { days: windowDays = 30, generatedAt = '' }
   <div class="scroll"><table>
     <tr><th>Poste</th><th class="num">Sessions</th><th class="num">Temps actif</th><th class="num">Relances</th>
       <th class="num">Frictions</th><th class="num">Outils</th><th class="num">Erreurs</th><th class="num">Tokens</th><th>Projets</th></tr>
-    ${users.map((u, i) => `<tr>
-      <td><span class="who"><i style="background:var(--s${i % 5})"></i>${esc(u.user)}</span></td>
+    ${users.map(u => `<tr>
+      <td><span class="who"><i style="background:var(--s${colorOf.get(u.user) ?? 0})"></i><a class="ulink" href="?days=${windowDays}&user=${encodeURIComponent(u.user)}">${esc(u.user)}</a></span></td>
       <td class="num">${nf(u.sessions)}</td>
       <td class="num">${hoursLabel(u.active)}</td>
       <td class="num">${nf(u.prompts)}</td>
@@ -213,11 +227,10 @@ export function renderCockpit(cards, { days: windowDays = 30, generatedAt = '' }
     <tr><th>Date</th><th>Poste</th><th>Projet</th><th>Sujet</th><th class="num">Actif</th>
       <th class="num">Relances</th><th class="num">Outils</th><th class="num">Frictions</th></tr>
     ${recent.map(c => {
-      const i = users.findIndex(u => u.user === c.user);
       const fr = (c.signals && c.signals.friction) || 0;
       return `<tr>
         <td class="tag">${esc(c.date)}</td>
-        <td><span class="who"><i style="background:var(--s${(i < 0 ? 0 : i) % 5})"></i>${esc(c.user || '')}</span></td>
+        <td><span class="who"><i style="background:var(--s${colorOf.get(c.user) ?? 0})"></i>${esc(c.user || '')}</span></td>
         <td class="tag">${esc(c.project || '')}</td>
         <td class="subj" title="${esc(c.subject)}">${esc(c.subject)}</td>
         <td class="num">${hoursLabel(c.active_min || 0)}</td>

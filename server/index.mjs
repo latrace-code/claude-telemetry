@@ -147,14 +147,15 @@ async function loadCards(sinceDate) {
 
 async function handleCockpit(req, res, url) {
   const days = Math.min(365, Math.max(1, parseInt(url.searchParams.get('days') || '30', 10) || 30));
+  const user = safeId(url.searchParams.get('user') || '') || '';
   const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
-  const key = `d${days}`;
+  const key = `d${days}u${user}`;
   if (cockpitCache.key === key && Date.now() - cockpitCache.at < COCKPIT_CACHE_MS) {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     return res.end(cockpitCache.html);
   }
   const cards = await loadCards(since);
-  const html = renderCockpit(cards, { days, generatedAt: new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC' });
+  const html = renderCockpit(cards, { days, user, generatedAt: new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC' });
   cockpitCache = { key, at: Date.now(), html };
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
   res.end(html);
