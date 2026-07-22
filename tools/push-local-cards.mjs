@@ -15,7 +15,13 @@ const arg = (name, def) => {
   return i > -1 ? process.argv[i + 1] : def;
 };
 
-const cfg = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'client', 'config.json'), 'utf8'));
+// Meme source que le capteur : la config du poste d'abord, le fichier du depot ensuite (il n'existe
+// plus depuis que le secret en est sorti, et il porterait un jeton perime).
+const readCfg = p => { try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return {}; } };
+const cfg = {
+  ...readCfg(join(dirname(fileURLToPath(import.meta.url)), '..', 'client', 'config.json')),
+  ...readCfg(join(homedir(), '.latrace-telemetry', 'config.json')),
+};
 const dir = arg('dir', join(homedir(), 'brain', 'telemetry', 'sessions'));
 const user = arg('user', 'lucas');
 const since = arg('since', '0000-00-00');
