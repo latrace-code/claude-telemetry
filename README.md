@@ -90,6 +90,21 @@ Le service est **en écriture seule** : aucune route ne rend de donnée. Les tra
 contenu des fichiers lus et la sortie des commandes exécutées, donc potentiellement des credentials.
 La lecture passe par les accès IAM du bucket, jamais par HTTP.
 
+Trois routes d'ingestion, toutes en POST derrière le token Bearer :
+
+| Route | Rôle |
+|---|---|
+| `/v1/sessions` | dépôt d'une fiche par le poste |
+| `/v1/verdicts` | pose le verdict de friction sur une fiche déjà déposée |
+| `/v1/transcripts/sign` | URL signée d'écriture pour le transcript gzippé |
+
+`/v1/verdicts` existe parce que le juge de friction (haiku) tourne **après** l'envoi, sur la machine
+d'audit et non sur le poste. Lui faire renvoyer la fiche entière écraserait les champs que seul le
+poste connaît (surface, hôte, version du client, sidechains) : il n'envoie donc que son verdict, et
+le serveur le pose sur la fiche stockée. Sans cette route, `signals.friction` restait `null` dans le
+bucket pour toujours et la tuile Frictions du cockpit ne montrait que l'historique backfillé.
+La réponse ne renvoie que ce que l'appelant vient d'écrire : la règle d'écriture seule tient.
+
 ## Auditer
 
 ```bash

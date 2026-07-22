@@ -97,6 +97,49 @@ async function handleSession(req, res) {
   ok(res, { stored: true });
 }
 
+// Le juge de friction (haiku) ne tourne PAS sur le poste qui produit la fiche : il passe apres coup,
+// depuis la machine d'audit. Il n'a donc pas le droit de renvoyer une fiche entiere, il ecraserait
+// les champs que seul le poste connait (host, entrypoint, client_version, sidechains). Il envoie son
+// verdict, le serveur le pose sur la fiche stockee.
+// Sans cette route, `signals.friction` restait `null` cote bucket POUR TOUJOURS : le jugement se
+// faisait en local et la fiche distante n'etait jamais reecrite. La tuile Frictions du cockpit ne
+// montrait donc que l'historique pousse a la main par push-local-cards, et rien du flux courant.
+async function handleVerdict(req, res) {
+  const body = await readBody(req);
+  const user = normUser(safeId(body.user) || 'unknown');
+  const sid = safeId(body.sid);
+  const date = SAFE_DATE.test(body.date || '') ? body.date : null;
+  if (!sid || !date) return fail(res, 400, 'invalid sid/date');
+
+  const file = storage.bucket(BUCKET).file(`cards/${user}/${date}_${sid}.json`);
+  let card;
+  try { card = JSON.parse((await file.download())[0].toString('utf8')); }
+  catch { return fail(res, 404, 'card not found'); }
+
+  // On ne prend du verdict QUE ce que le juge a mesure. Tout le reste de la fiche appartient au poste.
+  const v = (body.verdict && typeof body.verdict === 'object') ? body.verdict : {};
+  const n = x => (Number.isFinite(x) && x >= 0 ? Math.trunc(x) : 0);
+  card.signals = {
+    ...(card.signals || {}),
+    friction: n(v.friction),
+    correction: n(v.correction),
+    regression: n(v.regression),
+  };
+  card.friction_prompts = Array.isArray(v.friction_prompts)
+    ? v.friction_prompts.slice(0, 100).map(f => ({
+        text: String(f && f.text || '').slice(0, 240),
+        turns: n(f && f.turns),
+        min: n(f && f.min),
+        famille: typeof (f && f.famille) === 'string' ? f.famille.slice(0, 40) : null,
+      }))
+    : [];
+  card.judged = true;
+  card.judged_at = new Date().toISOString();
+
+  await file.save(JSON.stringify(card, null, 1), { contentType: 'application/json', resumable: false });
+  ok(res, { judged: true, friction: card.signals.friction });
+}
+
 async function handleSign(req, res) {
   const body = await readBody(req);
   const user = normUser(safeId(body.user) || 'unknown');
@@ -184,6 +227,7 @@ createServer(async (req, res) => {
     if (req.method !== 'POST') return fail(res, 404, 'not found');
     if (!authed(req)) return fail(res, 401, 'unauthorized');
     if (req.url === '/v1/sessions') return await handleSession(req, res);
+    if (req.url === '/v1/verdicts') return await handleVerdict(req, res);
     if (req.url === '/v1/transcripts/sign') return await handleSign(req, res);
     return fail(res, 404, 'not found');
   } catch (e) {
