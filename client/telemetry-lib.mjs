@@ -221,6 +221,9 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
   let openFriction = null;
 
   const brainAcc = newBrainAcc();
+  // Session courante : sert a ecarter les messages rejoues d'une conversation dont celle-ci est issue.
+  const ownSid = meta.sid || null;
+  let inheritedEvents = 0;
   // Surface qui a produit la session (`cli`, `sdk-cli` pour un agent headless, et les valeurs
   // propres aux autres clients). Sans ce champ on ne peut que supposer qui travaille dans quoi,
   // alors que l'equipe est repartie entre CLI et application.
@@ -228,6 +231,16 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
 
   for (const e of events) {
     if (!entrypoint && e && typeof e.entrypoint === 'string') entrypoint = e.entrypoint.slice(0, 40);
+
+    // Reprise de conversation : le transcript de la nouvelle session REJOUE tout l'historique de
+    // celle dont elle est issue, et chaque message garde le `sessionId` de son origine. Sans ce
+    // filtre, chaque reprise recomptait le travail des precedentes : mesure sur un poste reel,
+    // 79 fiches pour 49 conversations, +43 % de prompts, d'outils et de temps. Deux transcripts d'un
+    // meme fil partageaient 2 639 messages, soit 94 % du plus petit.
+    // On ne compte donc que ce qui appartient a CETTE session. Un transcript sans `sessionId`
+    // (ancien format) n'est pas filtre, sinon il ne resterait rien.
+    if (ownSid && e && e.sessionId && e.sessionId !== ownSid) { inheritedEvents++; continue; }
+
     const ts = parseTs(e && e.timestamp);
     if (ts !== null) {
       if (start === null || ts < start) start = ts;
@@ -355,6 +368,9 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     friction_prompts: frictionPrompts.map(f => ({ text: f.text, turns: f.turns, min: toMin(f.ms), famille: f.famille })),
     subject: subject || fallbackSubject,
     entrypoint,
+    // Messages rejoues d'une session anterieure, ecartes du comptage. > 0 = cette session est la
+    // reprise d'un fil precedent, et son travail propre est ce qui reste.
+    inherited_events: inheritedEvents,
     // false = les signaux de friction sont à null, en attente de judge-fiches.mjs. Un consommateur
     // qui lit signals.friction sans regarder `judged` lira null et doit le traiter comme "inconnu",
     // jamais comme zéro.
