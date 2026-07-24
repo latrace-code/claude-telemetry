@@ -211,6 +211,11 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
   let inTok = 0, outTok = 0, cacheR = 0;
   const tools = {};
   let toolErrors = 0, subagents = 0;
+  // Un tour = une requete API, mais il s'ecrit en PLUSIEURS lignes JSONL (une par bloc : thinking,
+  // texte, chaque tool_use) et CHAQUE ligne recopie le meme `usage`. Sans dedup, sommer par ligne
+  // gonfle tokens et tours ~3x (mesure : session Tom 95c61e62, 426k -> 130k, 160 lignes -> 54 tours).
+  // On compte usage/tour une seule fois par message.id ; les tool_use restent comptes par bloc.
+  const seenTurns = new Set();
   const sig = detector
     ? { friction: 0, regression: 0, correction: 0, validation: 0, interrupt: 0 }
     : { friction: null, regression: null, correction: null, validation: null, interrupt: 0 };
@@ -276,12 +281,16 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     if (!m) continue;
 
     if (m.role === 'assistant') {
-      assistantTurns++;
-      if (openFriction) openFriction.turns++;
-      const u = m.usage || {};
-      inTok += u.input_tokens || 0;
-      outTok += u.output_tokens || 0;
-      cacheR += u.cache_read_input_tokens || 0;
+      const mid = m.id || null;
+      if (!mid || !seenTurns.has(mid)) {
+        if (mid) seenTurns.add(mid);
+        assistantTurns++;
+        if (openFriction) openFriction.turns++;
+        const u = m.usage || {};
+        inTok += u.input_tokens || 0;
+        outTok += u.output_tokens || 0;
+        cacheR += u.cache_read_input_tokens || 0;
+      }
       if (Array.isArray(m.content)) {
         for (const b of m.content) {
           if (b && b.type === 'tool_use') {
@@ -339,7 +348,9 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     ts_end: end ? new Date(end).toISOString() : null,
     wall_min: wallMin,
     // Temps où quelque chose est réellement produit (IA qui enchaîne, Lucas qui écrit).
-    active_min: toMin(produceMs),
+    // Clamp de sûreté : un transcript non chronologique a déjà produit des actifs négatifs (-70h vu
+    // sur un poste), le garde `ts >= prevTs` couvre les nouveaux cas mais pas les fiches déjà en base.
+    active_min: Math.max(0, toMin(produceMs)),
     // Attente courte : l'IA a rendu la main, Lucas review / est parti boire un café.
     wait_min: toMin(waitMs),
     n_waits: nWaits,
@@ -455,6 +466,7 @@ export function scanSidechains(fs, sessionDir, opts = {}) {
   if (!files.length && !workflows.length) return null;
 
   let turns = 0, tokensOut = 0, toolsTotal = 0, toolErrors = 0, scanned = 0;
+  const seenAgentTurns = new Set(); // meme dedup que la mere : usage compte une fois par message.id
   const brainAcc = newBrainAcc();
   for (const path of files) {
     if (Date.now() - t0 > budgetMs) break;
@@ -468,8 +480,12 @@ export function scanSidechains(fs, sessionDir, opts = {}) {
       const m = e && e.message;
       if (!m) continue;
       if (m.role === 'assistant') {
-        turns++;
-        tokensOut += (m.usage && m.usage.output_tokens) || 0;
+        const mid = m.id || null;
+        if (!mid || !seenAgentTurns.has(mid)) {
+          if (mid) seenAgentTurns.add(mid);
+          turns++;
+          tokensOut += (m.usage && m.usage.output_tokens) || 0;
+        }
         if (Array.isArray(m.content)) for (const b of m.content) if (b && b.type === 'tool_use') {
           toolsTotal++;
           collectBrainAccess(b.name, b.input, brainAcc);

@@ -18,20 +18,47 @@ function hoursLabel(min) {
   return h ? `${h} h ${String(m).padStart(2, '0')}` : `${m} min`;
 }
 
+// Minutes couvertes par l'UNION des fenetres [debut, fin] d'un poste. Sert de denominateur a la
+// densite : deux sessions actives a la meme minute couvrent une seule minute d'horloge. Comparee au
+// temps actif (qui, lui, LES compte toutes), elle revele le travail en parallele.
+function unionMinutes(intervals) {
+  const iv = intervals.filter(x => x[1] > x[0]).sort((a, b) => a[0] - b[0]);
+  if (!iv.length) return 0;
+  let total = 0, cs = iv[0][0], ce = iv[0][1];
+  for (let i = 1; i < iv.length; i++) {
+    const [s, e] = iv[i];
+    if (s <= ce) ce = Math.max(ce, e); else { total += ce - cs; cs = s; ce = e; }
+  }
+  return (total + (ce - cs)) / 60000;
+}
+
 function aggregate(cards) {
   const byUser = new Map();
   const byDay = new Map();
-  const totals = { sessions: 0, active: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0 };
+  const totals = { sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0 };
+  const allIv = [];
 
   for (const c of cards) {
     const u = c.user || 'inconnu';
     const d = c.date || '';
-    const active = c.active_min || 0;
+    // Clamp : de vieilles fiches portent un actif negatif (transcript non chronologique, -70h vu sur
+    // un poste). La lib est corrigee, mais le bucket garde l'ancienne valeur jusqu'au recompute.
+    const active = Math.max(0, c.active_min || 0);
+    const wait = Math.max(0, c.wait_min || 0);
+    const dormant = Math.max(0, c.dormant_min || 0);
+    const wall = Math.max(0, c.wall_min || 0);
     const fr = (c.signals && c.signals.friction) || 0;
+    // Fenetre de TRAVAIL (pas le wall) : on ampute le dormant, sinon une session laissee ouverte 3 h
+    // dilue le denominateur et ecrase la densite. Approximee contigue depuis le debut (le dormant est
+    // presque toujours en fin de session). Denominateur = temps d'horloge reellement travaille.
+    const work = active + wait;
+    const startMs = c.ts_start ? Date.parse(c.ts_start) : null;
+    const iv = (startMs !== null && work > 0) ? [startMs, startMs + work * 60000] : null;
 
-    if (!byUser.has(u)) byUser.set(u, { user: u, sessions: 0, active: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, projects: new Set(), surfaces: new Set(), scoped: false });
+    if (!byUser.has(u)) byUser.set(u, { user: u, sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, projects: new Set(), surfaces: new Set(), scoped: false, iv: [] });
     const U = byUser.get(u);
-    U.sessions++; U.active += active; U.prompts += c.user_prompts || 0; U.frictions += fr;
+    U.sessions++; U.active += active; U.wait += wait; U.dormant += dormant; U.wall += wall;
+    U.prompts += c.user_prompts || 0; U.frictions += fr;
     U.tools += c.tools_total_all ?? c.tools_total ?? 0;
     U.errors += c.tool_errors_all ?? c.tool_errors ?? 0;
     U.tokens += c.tokens_out_all ?? c.tokens_out ?? 0;
@@ -39,20 +66,23 @@ function aggregate(cards) {
     if (c.project) U.projects.add(c.project);
     if (c.entrypoint) U.surfaces.add(c.entrypoint);
     if (c.scoped) U.scoped = true;
+    if (iv) { U.iv.push(iv); allIv.push(iv); }
 
     if (!byDay.has(d)) byDay.set(d, { date: d, users: new Map(), total: 0 });
     const D = byDay.get(d);
     D.users.set(u, (D.users.get(u) || 0) + active);
     D.total += active;
 
-    totals.sessions++; totals.active += active; totals.prompts += c.user_prompts || 0;
-    totals.frictions += fr;
+    totals.sessions++; totals.active += active; totals.wait += wait; totals.dormant += dormant; totals.wall += wall;
+    totals.prompts += c.user_prompts || 0; totals.frictions += fr;
     totals.tools += c.tools_total_all ?? c.tools_total ?? 0;
     totals.errors += c.tool_errors_all ?? c.tool_errors ?? 0;
     totals.tokens += c.tokens_out_all ?? c.tokens_out ?? 0;
     totals.agents += c.agents_total || 0;
   }
 
+  for (const U of byUser.values()) { U.covered = unionMinutes(U.iv); delete U.iv; }
+  totals.covered = unionMinutes(allIv);
   const users = [...byUser.values()].sort((a, b) => b.active - a.active);
   const days = [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date));
   return { users, days, totals };
@@ -85,6 +115,33 @@ function stackedChart(days, users, colorOf) {
       <div class="ygrid"><span>${hoursLabel(max)}</span><span>${hoursLabel(max / 2)}</span><span>0</span></div>
       <div class="cols">${cols}</div>
     </div>`;
+}
+
+// Densite = temps actif / temps reel couvert (union des fenetres). >1 : plusieurs sessions actives
+// en meme temps, c'est du travail parallele, pas un artefact. <1 : sessions etalees, longues pauses
+// entre deux sollicitations (on code a la main, on reflechit). Caracterise un STYLE, sans le juger.
+function density(u) { return u.covered > 0 ? u.active / u.covered : 0; }
+function densLabel(u) { const d = density(u); return d ? d.toFixed(2).replace('.', ',') + '×' : '—'; }
+
+// Ou part le temps de chaque poste : actif (on produit), attente/review (l'IA a rendu la main, on
+// lit ou on est parti), dormant (session laissee ouverte > 90 min). Repond a "un petit temps actif
+// veut-il dire peu de travail ?" : non, il faut voir la part d'attente a cote.
+function timeBreakdown(users, colorOf) {
+  if (!users.length) return '<p class="empty">Aucune session sur la periode.</p>';
+  const maxTot = Math.max(...users.map(u => u.active + u.wait + u.dormant), 1);
+  const rows = users.map(u => {
+    const tot = u.active + u.wait + u.dormant;
+    const w = x => (x / maxTot * 100).toFixed(2) + '%';
+    const seg = (x, cls, name) => x ? `<span class="tb-seg ${cls}" style="width:${w(x)}" data-tip="${esc(name)} · ${esc(hoursLabel(x))}"></span>` : '';
+    return `<div class="tb-row">
+      <div class="tb-name"><span class="who"><i style="background:var(--s${colorOf.get(u.user) ?? 0})"></i>${esc(u.user)}</span></div>
+      <div class="tb-track" style="width:${(tot / maxTot * 100).toFixed(2)}%">
+        ${seg(u.active, 'act', 'actif')}${seg(u.wait, 'wai', 'attente / review')}${seg(u.dormant, 'dor', 'dormant')}</div>
+      <div class="tb-dens" title="temps actif / temps reel couvert : au-dela de 1, des sessions tournent en parallele">${densLabel(u)}</div>
+    </div>`;
+  }).join('');
+  return `<div class="tb-legend"><span class="lg"><i class="sw act"></i>actif</span><span class="lg"><i class="sw wai"></i>attente / review</span><span class="lg"><i class="sw dor"></i>dormant (session ouverte)</span><span class="lg tb-dhint">colonne de droite : densite (sessions en parallele)</span></div>
+    <div class="tb">${rows}</div>`;
 }
 
 // Reprendre une conversation cree une nouvelle session dont le transcript rejoue l'historique.
@@ -131,6 +188,9 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   const { users, days, totals } = aggregate(cards);
   const botTotals = aggregate(selected ? botCards.filter(c => c.user === selected) : botCards).totals;
   const errRate = totals.tools ? (totals.errors / totals.tools) * 100 : 0;
+  // Intensite = temps actif / temps reel couvert. Au-dela de 1, plusieurs sessions tournent en
+  // parallele : c'est du travail sur plusieurs sujets a la fois, compte plein, pas un artefact.
+  const intensity = totals.covered ? totals.active / totals.covered : 0;
 
   const recent = [...cards].sort((a, b) => String(b.ts_start).localeCompare(String(a.ts_start))).slice(0, 60);
   const frictions = cards
@@ -153,9 +213,11 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
 <style>
   :root{color-scheme:light;--plane:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
     --grid:#e1e0d9;--axis:#c3c2b7;--ring:rgba(11,11,11,.10);--crit:#d03b3b;
+    --act:#4b4a46;--wai:#a8a69e;--dor:#dcdbd3;
     --s0:${SERIES_LIGHT[0]};--s1:${SERIES_LIGHT[1]};--s2:${SERIES_LIGHT[2]};--s3:${SERIES_LIGHT[3]};--s4:${SERIES_LIGHT[4]}}
   @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){color-scheme:dark;--plane:#0d0d0d;--surface:#1a1a19;
     --ink:#fff;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);
+    --act:#e3e8eb;--wai:#6c6b67;--dor:#333330;
     --s0:${SERIES_DARK[0]};--s1:${SERIES_DARK[1]};--s2:${SERIES_DARK[2]};--s3:${SERIES_DARK[3]};--s4:${SERIES_DARK[4]}}}
   *{box-sizing:border-box}
   body{margin:0;background:var(--plane);color:var(--ink);
@@ -191,6 +253,17 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   .seg{width:100%;min-height:2px}
   .stack:hover{outline:2px solid var(--ring);outline-offset:1px}
   .xlab{font-size:10px;color:var(--muted);text-align:center;height:20px;line-height:20px;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .cap{color:var(--muted);font-size:12px;margin:14px 0 0}
+  .tb{display:flex;flex-direction:column;gap:9px}
+  .tb-row{display:grid;grid-template-columns:130px 1fr 54px;align-items:center;gap:12px}
+  .tb-name{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tb-track{display:flex;height:16px;border-radius:4px;overflow:hidden;min-width:2px}
+  .tb-seg{height:100%}.tb-seg.act{background:var(--act)}.tb-seg.wai{background:var(--wai)}.tb-seg.dor{background:var(--dor)}
+  .tb-dens{font-size:13px;text-align:right;font-variant-numeric:tabular-nums;color:var(--ink2)}
+  .tb-legend{display:flex;flex-wrap:wrap;gap:14px;margin-bottom:16px;font-size:13px;color:var(--ink2);align-items:center}
+  .tb-legend .sw{width:10px;height:10px;border-radius:3px;display:inline-block}
+  .sw.act{background:var(--act)}.sw.wai{background:var(--wai)}.sw.dor{background:var(--dor)}
+  .tb-dhint{color:var(--muted);font-size:12px;margin-left:auto}
   table{width:100%;border-collapse:collapse;font-size:13px}
   th{text-align:left;font-weight:600;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em;
     padding:0 10px 8px 0;border-bottom:1px solid var(--grid)}
@@ -224,12 +297,15 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   <h2>Vue d'ensemble</h2>
   <div class="tiles">
     ${tile('Sessions', nf(totals.sessions), `${users.length} poste${users.length > 1 ? 's' : ''}`)}
-    ${tile('Temps actif', hoursLabel(totals.active), 'hors attente et nuits')}
+    ${tile('Temps actif', hoursLabel(totals.active), 'on produit, gaps > 5 min exclus')}
+    ${tile('Temps machine', hoursLabel(totals.active + totals.wait), 'actif + attente / review')}
+    ${tile('Intensite', intensity ? intensity.toFixed(2).replace('.', ',') + '×' : '—', 'sessions en parallele')}
     ${tile('Relances humaines', nf(totals.prompts), totals.sessions ? `${(totals.prompts / totals.sessions).toFixed(1)} par session` : '')}
     ${tile('Frictions', nf(totals.frictions), 'prompts marques')}
     ${tile('Appels d\'outils', nf(totals.tools), `${errRate.toFixed(1)} % d'erreurs`)}
     ${tile('Tokens produits', nf(totals.tokens), `${nf(totals.agents)} agents`)}
   </div>
+  <p class="note"><b>Temps actif</b> = le temps ou une machine que vous avez lancee produit vraiment (l'IA enchaine, vous ecrivez), les silences de plus de 5 min exclus. Il mesure l'<b>intensite de collaboration</b>, pas les heures de presence. Deux sessions actives a la meme minute comptent double : travailler sur plusieurs sujets en parallele compte plein. Un poste au temps actif faible n'a pas moins travaille : il sollicite l'IA par a-coups (voir la part d'attente ci-dessous).</p>
   ${folded ? `<p class="note">${nf(folded)} session(s) repliee(s) : ce sont des reprises d'une meme conversation, dont le transcript rejoue l'historique. Sans ce repli, le meme travail serait compte plusieurs fois.</p>` : ''}
   ${botTotals.sessions ? `<p class="note">${nf(botTotals.sessions)} sessions automatiques (boucles d'amelioration, juge, digest) exclues de ces chiffres. Leur cout : ${nf(botTotals.tokens)} tokens, ${hoursLabel(botTotals.active)}. <a href="${q(selected)}${bots ? '' : '&bots=1'}" class="ulink">${bots ? 'les masquer' : 'les afficher'}</a>.</p>` : ''}
 </section>
@@ -237,17 +313,26 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
 <section>
   <h2>Temps actif par jour</h2>
   ${stackedChart(days, users, colorOf)}
+  <p class="cap">Empile le temps actif de chaque poste. Le parallelisme est compte plein : un jour peut donc depasser 24 h cumulees si plusieurs sessions tournent en meme temps.</p>
+</section>
+
+<section>
+  <h2>Ou part le temps</h2>
+  ${timeBreakdown(users, colorOf)}
+  <p class="cap">Meme largeur = meme temps total (actif + attente + dormant). Un poste tres a droite en "attente" est present mais sollicite l'IA par a-coups ; il ne travaille pas moins. La densite (× a droite) dit combien de sessions tournent en parallele.</p>
 </section>
 
 <section>
   <h2>Par poste</h2>
   <div class="scroll"><table>
-    <tr><th>Poste</th><th class="num">Sessions</th><th class="num">Temps actif</th><th class="num">Relances</th>
+    <tr><th>Poste</th><th class="num">Sessions</th><th class="num">Temps actif</th><th class="num">Attente</th><th class="num" title="temps actif / temps reel : > 1 = sessions en parallele">Densite</th><th class="num">Relances</th>
       <th class="num">Frictions</th><th class="num">Outils</th><th class="num">Erreurs</th><th class="num">Tokens</th><th>Surface</th><th>Projets</th></tr>
     ${users.map(u => `<tr>
       <td><span class="who"><i style="background:var(--s${colorOf.get(u.user) ?? 0})"></i><a class="ulink" href="?days=${windowDays}&user=${encodeURIComponent(u.user)}">${esc(u.user)}</a></span>${u.scoped ? '<span class="scoped" title="Ce poste ne remonte qu\'une partie de ses sessions (perimetre restreint)">perimetre restreint</span>' : ''}</td>
       <td class="num">${nf(u.sessions)}</td>
       <td class="num">${hoursLabel(u.active)}</td>
+      <td class="num">${hoursLabel(u.wait)}</td>
+      <td class="num" title="sessions en parallele">${densLabel(u)}</td>
       <td class="num">${nf(u.prompts)}</td>
       <td class="num${u.frictions ? ' alert' : ''}">${nf(u.frictions)}</td>
       <td class="num">${nf(u.tools)}</td>
