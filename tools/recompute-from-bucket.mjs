@@ -54,9 +54,17 @@ let sent = 0, skipped = 0;
 for (const s of sessions.values()) {
   const tmp = mkdtempSync(join(tmpdir(), 'recompute-'));
   try {
-    // Reconstitue l'arborescence locale attendue par scanSidechains : <sid>.jsonl + <sid>/subagents/...
+    // Reconstitue l'arborescence locale attendue par scanSidechains : le transcript mere a plat en
+    // <sid>.jsonl, et TOUT le reste (subagents/, workflows/) sous le REPERTOIRE DE SESSION <sid>/,
+    // parce que c'est ce repertoire qu'on lui passe plus bas.
+    //
+    // Poser `subagents/` a la racine du temporaire, comme on le faisait, ne fait rien echouer : ca
+    // rend `sidechains: null` en silence, donc zero agent, zero token d'agent, zero outil d'agent.
+    // Corpus rejoue avec le bug : les outils de lucas tombaient de 65 488 a 40 173 (-39 %) et ses
+    // tokens de 45,7 a 38,6 M, sans un seul message d'erreur. Une session verifiee (96c942e4) portait
+    // 26 fichiers d'agents stockes et ressortait a `sidechains: null`.
     for (const f of s.files) {
-      const dest = join(tmp, f.rel);
+      const dest = f.rel.includes('/') ? join(tmp, s.sid, f.rel) : join(tmp, f.rel);
       fs.mkdirSync(dirname(dest), { recursive: true });
       gs('cp', f.url, dest + '.gz');
       await pipeline(createReadStream(dest + '.gz'), createGunzip(), createWriteStream(dest));
@@ -65,10 +73,16 @@ for (const s of sessions.values()) {
     const main = join(tmp, `${s.sid}.jsonl`);
     if (!existsSync(main)) { skipped++; continue; }
 
-    const card = analyzeTranscript(readEvents(readFileSync, main), {
-      sid: s.sid,
-      sidechains: scanSidechains(fs, join(tmp, s.sid)),
-    });
+    const sidechains = scanSidechains(fs, join(tmp, s.sid));
+    // Garde-fou : des fichiers d'agents stockes mais aucun agent lu, c'est l'arborescence qui est
+    // mal reconstituee, et ca ne se voit nulle part ailleurs (la fiche part, juste amputee).
+    const stored = s.files.filter(f => f.rel.startsWith('subagents/') && f.rel.endsWith('.jsonl')).length;
+    if (stored && !(sidechains && sidechains.agents)) {
+      console.log(`  ${s.sid.slice(0, 8)} ABANDON : ${stored} fichier(s) d'agents stockes, aucun relu`);
+      skipped++; continue;
+    }
+
+    const card = analyzeTranscript(readEvents(readFileSync, main), { sid: s.sid, sidechains });
     if (!card.subject) { skipped++; continue; }
 
     // Champs que seul le poste connait : on les reprend de la fiche existante plutot que de les inventer.
