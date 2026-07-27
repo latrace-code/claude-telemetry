@@ -101,6 +101,27 @@ function parseTs(s) {
   return Number.isNaN(t) ? null : t;
 }
 
+// Lignes admises dans la FRISE (bornes de session et découpe du temps). Allowlist et pas denylist :
+// Claude Desktop écrit en tête de transcript des lignes qui ne sont pas des évènements de
+// conversation (`queue-operation`, `pr-link`, `ai-title`, `custom-title`, `mode`, `last-prompt`,
+// `file-history-*`, `permission-mode`, `worktree-state`...) et les horodate au DERNIER ACCÈS à la
+// conversation, pas à leur écriture : elles portent donc une date FUTURE. Le ratchet ci-dessous s'y
+// calait dès la ligne 3 et rejetait ensuite tout le travail réel. Mesuré sur les transcripts
+// stockés : 29,7 % des évènements horodatés de tom rejetés, dont 96 % derrière une `queue-operation`
+// ou un `pr-link` ; sa session e58ae891 sortait à 7 min pour 230 min de conversation.
+// Une denylist laisserait passer le prochain type de ligne d'en-tête sans que personne ne le voie.
+//
+// Le reste (les métadonnées) n'est pas jeté pour autant : une `queue-operation` du CLI est écrite au
+// moment où le prompt part en file, elle coupe légitimement un trou en deux. Ces lignes sont donc
+// admises A POSTERIORI, seulement si leur date tombe VRAIMENT entre deux évènements de conversation
+// (voir la boucle plus bas). Ce test d'encadrement EST le test de confiance : une ligne d'en-tête
+// Desktop datée du dernier accès tombe hors de l'intervalle et disparaît, une ligne du CLI écrite
+// sur le moment tombe dedans et compte. Vérifié : lucas ne bouge pas d'une minute.
+const TIMELINE_TYPES = new Set(['user', 'assistant', 'system', 'attachment', 'file-history-delta']);
+function isTimelineEvent(e) {
+  return !!(e && (e.message ? true : TIMELINE_TYPES.has(e.type)));
+}
+
 // NFC obligatoire : les transcripts contiennent des accents décomposés (NFD, "é" = e + U+0301).
 // Sans ça, toutes les regex accentuées ci-dessus (cassé, arrête, à l'envers, journée...) ratent en silence.
 function normalize(s) { return String(s).normalize('NFC').replace(/\s+/g, ' ').trim(); }
@@ -274,6 +295,10 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
 
   // Découpe du temps : produce = quelqu'un travaille, wait = attente courte, dormant = session laissée ouverte.
   let produceMs = 0, waitMs = 0, dormantMs = 0, nWaits = 0, nDormant = 0;
+  // Temps actif VENTILÉ PAR JOUR. Une session de plusieurs jours (les reprises Desktop courent
+  // jusqu'a 22 jours) voyait tout son actif impute a sa date de debut par le cockpit, donc datait
+  // le travail n'importe ou. Le transcript sait exactement quel jour a produit quoi : autant l'ecrire.
+  const produceByDay = new Map();
 
   // Friction ouverte : on lui impute les tours et le temps jusqu'au prochain prompt humain.
   let openFriction = null;
@@ -294,6 +319,32 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
   // alors que l'equipe est repartie entre CLI et application.
   let entrypoint = null;
 
+  // Métadonnées horodatées vues depuis le dernier évènement de conversation, en attente d'être
+  // encadrées par le suivant.
+  const pendingMeta = [];
+
+  // Un transcript n'est PAS toujours chronologique : une reprise de conversation, un fork ou une
+  // compaction réinjectent des messages plus anciens. Le gap devient négatif et, comme il passait le
+  // test `d < ACTIVE_GAP_MS`, il était SOUSTRAIT du temps actif. Mesuré sur une session réelle :
+  // 6 sauts en arrière sur 933 events (0,6 % des transitions) suffisaient à retirer 71 heures et à
+  // afficher -4 201 min pour 83 min de travail réel. On ignore donc les reculs, et prevTs ne
+  // redescend jamais : sinon le gap suivant, artificiellement énorme, partirait en "dormant".
+  const advance = t => {
+    if (prevTs !== null && t >= prevTs) {
+      const d = t - prevTs;
+      if (d < ACTIVE_GAP_MS) {
+        produceMs += d;
+        // Jour UTC de DÉBUT du creneau, meme convention que le champ `date`. Un creneau a cheval sur
+        // minuit est impute au jour ou il commence : l'erreur est bornee par 5 min et par nuit.
+        const k = new Date(prevTs).toISOString().slice(0, 10);
+        produceByDay.set(k, (produceByDay.get(k) || 0) + d);
+        if (openFriction) openFriction.ms += d;
+      } else if (d < DORMANT_GAP_MS) { waitMs += d; nWaits++; }
+      else { dormantMs += d; nDormant++; }
+    }
+    if (prevTs === null || t > prevTs) prevTs = t;
+  };
+
   for (const e of events) {
     if (!chainId && e && typeof e.uuid === 'string') chainId = e.uuid;
     if (!entrypoint && e && typeof e.entrypoint === 'string') entrypoint = e.entrypoint.slice(0, 40);
@@ -309,23 +360,20 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
 
     const ts = parseTs(e && e.timestamp);
     if (ts !== null) {
-      if (start === null || ts < start) start = ts;
-      if (end === null || ts > end) end = ts;
-      // Un transcript n'est PAS toujours chronologique : une reprise de conversation, un fork ou une
-      // compaction réinjectent des messages plus anciens. Le gap devient négatif et, comme il passait
-      // le test `d < ACTIVE_GAP_MS`, il était SOUSTRAIT du temps actif. Mesuré sur une session réelle :
-      // 6 sauts en arrière sur 933 events (0,6 % des transitions) suffisaient à retirer 71 heures et à
-      // afficher -4 201 min pour 83 min de travail réel. On ignore donc les reculs, et prevTs ne
-      // redescend jamais : sinon le gap suivant, artificiellement énorme, partirait en "dormant".
-      if (prevTs !== null && ts >= prevTs) {
-        const d = ts - prevTs;
-        if (d < ACTIVE_GAP_MS) {
-          produceMs += d;
-          if (openFriction) openFriction.ms += d;
-        } else if (d < DORMANT_GAP_MS) { waitMs += d; nWaits++; }
-        else { dormantMs += d; nDormant++; }
+      if (isTimelineEvent(e)) {
+        if (start === null || ts < start) start = ts;
+        if (end === null || ts > end) end = ts;
+        // Les métadonnées en attente ne comptent que si elles sont ENCADRÉES par deux évènements de
+        // conversation : celles qui sont datées après le prochain message sont des en-têtes Desktop
+        // et partent à la poubelle sans jamais avoir touché prevTs.
+        if (pendingMeta.length) {
+          for (const t of pendingMeta.sort((a, b) => a - b)) if (t < ts) advance(t);
+          pendingMeta.length = 0;
+        }
+        advance(ts);
+      } else if (prevTs !== null && ts > prevTs) {
+        pendingMeta.push(ts);
       }
-      if (prevTs === null || ts > prevTs) prevTs = ts;
     }
     if (e && typeof e.gitBranch === 'string' && e.gitBranch) branch = e.gitBranch;
     const m = e && e.message;
@@ -408,6 +456,13 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     // Clamp de sûreté : un transcript non chronologique a déjà produit des actifs négatifs (-70h vu
     // sur un poste), le garde `ts >= prevTs` couvre les nouveaux cas mais pas les fiches déjà en base.
     active_min: Math.max(0, toMin(produceMs)),
+    // Ventilation du temps actif par jour UTC, {"2026-07-07": 45, ...}. null quand la session n'a
+    // rien produit. Sert au cockpit a dater le travail la ou il a eu lieu plutot qu'a la date de
+    // debut de la fiche : a lire comme des POIDS (les arrondis a la minute ne resomment pas
+    // forcement `active_min`).
+    active_by_day: produceByDay.size
+      ? Object.fromEntries([...produceByDay.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([k, v]) => [k, toMin(v)]))
+      : null,
     // Attente courte : l'IA a rendu la main, Lucas review / est parti boire un café.
     wait_min: toMin(waitMs),
     n_waits: nWaits,
@@ -458,7 +513,7 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     // qui lit signals.friction sans regarder `judged` lira null et doit le traiter comme "inconnu",
     // jamais comme zéro.
     judged: !!detector,
-    schema: 5,
+    schema: 6,
   };
 }
 
