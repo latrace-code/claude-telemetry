@@ -5,7 +5,11 @@
 // le poste ne les renverra jamais (son index `sent.json` les considere comme faites). Comme les
 // transcripts bruts sont conserves, on peut tout rejouer sans toucher a la machine de personne.
 //
-//   node tools/recompute-from-bucket.mjs --user mathilde [--dry]
+//   node tools/recompute-from-bucket.mjs --user mathilde [--since 2026-07-20] [--dry]
+//
+// Compter ~4 s par session : le temps part en demarrages de gcloud, pas en calcul. Sur un poste qui
+// a des centaines de sessions stockees, passer `--since` pour rejouer d'abord la fenetre qu'on
+// regarde (le cockpit s'ouvre sur 7 ou 30 jours) plutot que d'attendre tout l'historique.
 
 import * as fs from 'node:fs';
 import { readFileSync, mkdtempSync, rmSync, existsSync, readdirSync, createReadStream, createWriteStream } from 'node:fs';
@@ -19,6 +23,7 @@ import { analyzeTranscript, readEvents, scanSidechains } from '../client/telemet
 
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i > -1 ? process.argv[i + 1] : d; };
 const user = arg('user');
+const since = arg('since', '0000-00-00');
 const dry = process.argv.includes('--dry');
 const bucket = process.env.LATRACE_TELEMETRY_BUCKET || 'latrace-claude-telemetry';
 if (!user) { console.error('usage: --user <nom> [--dry]'); process.exit(1); }
@@ -33,6 +38,7 @@ for (const line of gs('ls', '-r', `gs://${bucket}/transcripts/${user}/`).split('
   const m = line.trim().match(/^gs:\/\/[^/]+\/transcripts\/[^/]+\/(\d{4}-\d{2}-\d{2})\/([^/]+)\/(.+)\.gz$/);
   if (!m) continue;
   const [, date, sid, rel] = m;
+  if (date < since) continue;
   if (!sessions.has(sid)) sessions.set(sid, { sid, date, files: [] });
   sessions.get(sid).files.push({ rel, url: line.trim() });
 }
