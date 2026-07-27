@@ -167,6 +167,19 @@ Lucas, on ne peut pas rejouer l'historique d'un poste à distance.
   mises à jour. Mais l'enlever ne suffit pas à en déclencher : la mise à jour d'un marketplace tiers
   dépend uniquement d'`autoUpdate` (voir Installation). L'absence de `version` et la présence
   d'`autoUpdate` sont deux conditions nécessaires, aucune n'est suffisante seule.
+- **Reprises de conversation.** Rouvrir une conversation crée une session qui rejoue tout
+  l'historique. `chain_id` (l'uuid du premier message du transcript) identifie le FIL et survit au
+  réétiquetage des messages. Deux lectures du même corpus, à ne pas confondre : le cockpit **replie**
+  les fiches d'un fil pour compter le VOLUME de travail une seule fois, et **compte les fiches
+  brutes** du même fil pour mesurer le COMPORTEMENT (combien de réouvertures). Brancher la seconde
+  mesure sur les fiches repliées rendrait 1,00 session par fil partout. Une fiche sans `chain_id`
+  (émise avant le champ) est hors de la mesure, et le cockpit affiche la part de temps concernée.
+- **Compactions** (`compactions: {total, auto, manual}`, schema 7) : première métrique de santé d'une
+  session et pas de volume. `auto` = la fenêtre de contexte a débordé toute seule, `manual` =
+  quelqu'un a nettoyé avant. Le champ est toujours présent, même à zéro : `{total:0}` veut dire
+  « compté, rien trouvé », un champ absent veut dire « fiche émise avant la mesure », et le cockpit
+  affiche un tiret dans ce second cas. Les fiches déjà en base ne l'auront qu'après un
+  `recompute-from-bucket`.
 - Chaque fiche porte `plugin_version` : le sha du commit installé sur le poste qui l'a émise. C'est
   le seul champ qui dise la version réellement en service. Ne pas se fier au `schema` de la fiche
   pour ça, `recompute-from-bucket` le réécrit avec la lib de la machine qui rejoue. Le cockpit

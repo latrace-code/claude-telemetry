@@ -16,6 +16,13 @@
 // parallelism.mjs) puis jamais suivi : 83 % des appels ne portaient qu'un outil. C'est le seul levier
 // de vitesse mesurable, un aller-retour coûtant ~9,5 s contre ~0,8 s pour un outil de plus dans le
 // même message. À ne pas confondre avec la "densité" du cockpit, qui compte des SESSIONS en parallèle.
+//
+// schema 6 : ventilation du temps actif par jour (`active_by_day`), pour que le cockpit date le
+// travail là où il a eu lieu et pas à la date de début de la fiche (les reprises courent sur des jours).
+//
+// schema 7 : COMPACTIONS (`compactions`). Première mesure de SANTÉ d'une session et pas de volume :
+// une compaction dit que le contexte a saturé. Le déclencheur est distingué, parce qu'il ne dit pas
+// la même chose : `auto` = la fenêtre a débordé toute seule, `manual` = quelqu'un a nettoyé avant.
 
 // Marqueurs de friction dans les prompts humains. Proxy assumé : capte ce que Lucas VERBALISE,
 // pas les régressions silencieuses. La passe LLM affine ces compteurs bruts.
@@ -323,6 +330,14 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
   // encadrées par le suivant.
   const pendingMeta = [];
 
+  // Compactions subies par CETTE session. Claude Code écrit une ligne
+  // `{type:"system", subtype:"compact_boundary", compactMetadata:{trigger, preTokens}}` à chaque fois
+  // qu'il replie l'historique. Le déclencheur est gardé séparé : `auto` signale une fenêtre qui a
+  // débordé (la session perd son contexte sans que personne ne l'ait demandé), `manual` signale
+  // quelqu'un qui nettoie. Confondus, ils rendraient une session saine et une session à bout de
+  // souffle identiques. `unknown` = ligne sans métadonnée, deviner la mettrait dans la mauvaise case.
+  let compactAuto = 0, compactManual = 0, compactUnknown = 0;
+
   // Un transcript n'est PAS toujours chronologique : une reprise de conversation, un fork ou une
   // compaction réinjectent des messages plus anciens. Le gap devient négatif et, comme il passait le
   // test `d < ACTIVE_GAP_MS`, il était SOUSTRAIT du temps actif. Mesuré sur une session réelle :
@@ -357,6 +372,14 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     // On ne compte donc que ce qui appartient a CETTE session. Un transcript sans `sessionId`
     // (ancien format) n'est pas filtre, sinon il ne resterait rien.
     if (ownSid && e && e.sessionId && e.sessionId !== ownSid) { inheritedEvents++; continue; }
+
+    // Après le filtre ci-dessus, donc jamais les compactions rejouées d'une session antérieure.
+    if (e && e.subtype === 'compact_boundary') {
+      const trigger = e.compactMetadata && e.compactMetadata.trigger;
+      if (trigger === 'manual') compactManual++;
+      else if (trigger === 'auto') compactAuto++;
+      else compactUnknown++;
+    }
 
     const ts = parseTs(e && e.timestamp);
     if (ts !== null) {
@@ -509,11 +532,16 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     // reprise d'un fil precedent, et son travail propre est ce qui reste.
     inherited_events: inheritedEvents,
     chain_id: chainId,
+    // Compactions de la session mère (les agents ont leur propre fenêtre, les mélanger dirait n'importe
+    // quoi de la santé de celle-ci). Toujours présent, même à zéro : `{total:0}` veut dire "compté,
+    // rien trouvé", alors qu'un champ absent veut dire "fiche émise avant la mesure". Le cockpit doit
+    // afficher un tiret dans le second cas, un vrai zéro dans le premier.
+    compactions: { total: compactAuto + compactManual + compactUnknown, auto: compactAuto, manual: compactManual },
     // false = les signaux de friction sont à null, en attente de judge-fiches.mjs. Un consommateur
     // qui lit signals.friction sans regarder `judged` lira null et doit le traiter comme "inconnu",
     // jamais comme zéro.
     judged: !!detector,
-    schema: 6,
+    schema: 7,
   };
 }
 

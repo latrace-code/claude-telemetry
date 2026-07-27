@@ -85,10 +85,97 @@ function workWindow(card, active, wait, dormant) {
 // rien du poste : on n'affiche rien plutot qu'un chiffre calcule sur une minorite de son travail.
 const DENSITY_MIN_COVERAGE = 0.6;
 
-function aggregate(cards) {
+// --- Reprises de conversation ----------------------------------------------
+// Question posee : combien de fois une meme conversation est-elle rouverte, combien de temps un fil
+// reste-t-il vivant, et quelle part du travail passe par des reprises plutot que par des fils neufs.
+//
+// Le comptage se fait sur les fiches BRUTES, AVANT le repli, et c'est le point a ne pas confondre :
+// une fiche repliee par foldChains n'est pas un doublon a jeter, c'est la trace d'une REOUVERTURE.
+// Le repli sert au VOLUME de travail (ne pas compter deux fois les memes minutes), l'index ci-dessous
+// sert au COMPORTEMENT (compter les fois ou on a rouvert). Les deux lisent le meme corpus et n'en
+// tirent pas la meme chose ; brancher la mesure sur les fiches repliees rendrait 1,00 session par fil
+// partout, c'est-a-dire exactement l'inverse de ce qu'on cherche a voir.
+//
+// Une fiche sans `chain_id` (emise avant que le champ existe) n'est rattachable a aucun fil : elle est
+// hors de cette mesure, et la part du temps actif qu'elle represente est affichee comme telle.
+function chainIndex(cards) {
+  const idx = new Map();
+  for (const c of cards) {
+    if (!c.chain_id) continue;
+    const e = idx.get(c.chain_id) || { n: 0, start: Infinity, end: -Infinity };
+    e.n++;
+    const s = Date.parse(c.ts_start);
+    const f = Date.parse(c.ts_end);
+    if (Number.isFinite(s)) e.start = Math.min(e.start, s);
+    if (Number.isFinite(f)) e.end = Math.max(e.end, f);
+    idx.set(c.chain_id, e);
+  }
+  return idx;
+}
+
+// Profondeur de reprise d'un fil. Trois paliers et pas une valeur continue : on cherche a lire un
+// STYLE d'un coup d'oeil, pas a classer. Bornes calees sur le corpus (max observe : 6 sessions).
+const DEPTH_LABELS = ['fil neuf, jamais repris', 'repris 1 a 2 fois', 'repris 3 fois ou plus'];
+const depthBucket = n => (n >= 4 ? 2 : n >= 2 ? 1 : 0);
+
+// Meme doctrine que la densite : en dessous de cette couverture, la repartition ne dit plus rien du
+// poste et on affiche un tiret. Un zero calcule sur une minorite du travail ressemble a une mesure.
+const REPRISE_MIN_COVERAGE = 0.6;
+
+function median(xs) {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+function chainCoverage(u) { return u.active ? u.chainActive / u.active : 0; }
+function sessionsPerChain(u) { return u.chains ? u.chainSessions / u.chains : 0; }
+
+// `cards` est deja replie : chaque fil n'y apporte donc ses minutes qu'une fois. Le NOMBRE de
+// sessions du fil, lui, vient de l'index construit sur les fiches brutes.
+function addChain(acc, card, chains) {
+  const ch = card.chain_id ? chains.get(card.chain_id) : null;
+  if (!ch) return;
+  const active = Math.max(0, card.active_min || 0);
+  acc.chainActive += active;
+  acc.depth[depthBucket(ch.n)] += active;
+  if (acc.chainSeen.has(card.chain_id)) return;
+  acc.chainSeen.add(card.chain_id);
+  acc.chainSessions += ch.n;
+  if (ch.n > 1) {
+    acc.reprised++;
+    if (Number.isFinite(ch.start) && ch.end > ch.start) acc.spans.push((ch.end - ch.start) / 3600000);
+  }
+}
+
+// Un champ absent veut dire "fiche emise avant la mesure", pas "aucune compaction". Les deux se
+// distinguent par `compactSessions` : sans ce compteur, l'affichage rendrait un zero rassurant sur
+// un corpus ou personne n'a jamais mesure.
+function addCompactions(acc, card) {
+  const k = card.compactions;
+  if (!k || typeof k !== 'object') return;
+  acc.compactSessions++;
+  acc.compactions += k.total || 0;
+  acc.compactAuto += k.auto || 0;
+}
+
+function aggregate(cards, chains = new Map()) {
   const byUser = new Map();
   const byDay = new Map();
-  const totals = { sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, batch: { ...ZERO_BATCH }, covActive: 0 };
+  const newAcc = () => ({
+    sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0,
+    errors: 0, tokens: 0, agents: 0, batch: { ...ZERO_BATCH }, covActive: 0,
+    // Reprises : `chainActive` est le temps actif rattachable a un fil (le denominateur honnete des
+    // parts), `depth` ventile ce temps par profondeur de reprise, `spans` porte la duree de vie des
+    // seuls fils effectivement repris (celle d'un fil a une session n'est que sa propre duree).
+    chainSeen: new Set(), chainSessions: 0, chains: 0, reprised: 0, chainActive: 0,
+    depth: [0, 0, 0], spans: [],
+    // Compactions : `compactSessions` compte les fiches qui PORTENT la mesure. Sans lui, un total a
+    // zero ne se distingue pas d'un corpus emis avant l'ajout du champ.
+    compactions: 0, compactAuto: 0, compactSessions: 0,
+  });
+  const totals = newAcc();
   const allIv = [];
 
   for (const c of cards) {
@@ -102,10 +189,14 @@ function aggregate(cards) {
     const fr = (c.signals && c.signals.friction) || 0;
     const iv = workWindow(c, active, wait, dormant);
 
-    if (!byUser.has(u)) byUser.set(u, { user: u, sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, batch: { ...ZERO_BATCH }, projects: new Set(), surfaces: new Set(), scoped: false, iv: [], covActive: 0 });
+    if (!byUser.has(u)) byUser.set(u, { ...newAcc(), user: u, projects: new Set(), surfaces: new Set(), scoped: false, iv: [] });
     const U = byUser.get(u);
     addBatch(U.batch, c);
     addBatch(totals.batch, c);
+    addChain(U, c, chains);
+    addChain(totals, c, chains);
+    addCompactions(U, c);
+    addCompactions(totals, c);
     U.sessions++; U.active += active; U.wait += wait; U.dormant += dormant; U.wall += wall;
     U.prompts += c.user_prompts || 0; U.frictions += fr;
     U.tools += c.tools_total_all ?? c.tools_total ?? 0;
@@ -132,8 +223,9 @@ function aggregate(cards) {
     totals.agents += c.agents_total || 0;
   }
 
-  for (const U of byUser.values()) { U.covered = unionMinutes(U.iv); delete U.iv; }
+  for (const U of byUser.values()) { U.covered = unionMinutes(U.iv); U.chains = U.chainSeen.size; delete U.iv; }
   totals.covered = unionMinutes(allIv);
+  totals.chains = totals.chainSeen.size;
   const users = [...byUser.values()].sort((a, b) => b.active - a.active);
   const days = [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date));
   return { users, days, totals };
@@ -206,6 +298,56 @@ function timeBreakdown(users, colorOf) {
   }).join('');
   return `<div class="tb-legend"><span class="lg"><i class="sw act"></i>actif</span><span class="lg"><i class="sw wai"></i>attente / review</span><span class="lg"><i class="sw dor"></i>dormant (session ouverte)</span><span class="lg tb-dhint">colonne de droite : densite (sessions en parallele)</span></div>
     <div class="tb">${rows}</div>`;
+}
+
+function spanLabel(h) {
+  if (h == null) return '—';
+  if (h >= 48) return `${Math.round(h / 24)} j`;
+  if (h >= 1) return `${Math.round(h)} h`;
+  return `${Math.round(h * 60)} min`;
+}
+
+// COMMENT CHAQUE POSTE TRAITE SES CONVERSATIONS, lu d'un coup d'oeil.
+//
+// Forme : une barre par poste, toutes ramenees a 100 %. On compare ici un STYLE, pas un volume (le
+// volume est deja dans "Ou part le temps" juste au-dessus, et le laisser ici ecraserait les petits
+// postes sans rien apprendre). Chaque barre repond a : sur tout le temps que ce poste a produit,
+// quelle part est sortie d'un fil neuf, et quelle part est sortie d'une conversation deja ouverte.
+//
+// Palette : la rampe NEUTRE deja utilisee par "Ou part le temps", du clair au fonce, parce que la
+// profondeur de reprise est une grandeur ordonnee (sequentiel = une teinte, clair -> fonce) et
+// SURTOUT parce que les cinq teintes categorielles designent des personnes : une barre bleue a cote
+// de la pastille bleue de lucas se lirait comme "lucas". En sombre la rampe s'inverse, la valeur
+// forte restant celle qui contraste le plus avec le fond.
+function repriseChart(users, colorOf) {
+  if (!users.length) return '<p class="empty">Aucune session sur la periode.</p>';
+  const rows = users.map(u => {
+    const name = `<div class="rp-name"><span class="who"><i style="background:var(--s${colorOf.get(u.user) ?? 0})"></i>${esc(u.user)}</span></div>`;
+    const cov = chainCoverage(u);
+    if (!u.chains || !u.chainActive || cov < REPRISE_MIN_COVERAGE) {
+      const why = !u.chains
+        ? 'aucune fiche de ce poste ne porte l\'identifiant de fil (fiches emises avant la mesure)'
+        : `seules ${Math.round(100 * cov)} % des minutes actives sont rattachables a un fil`;
+      return `<div class="rp-row">${name}<div class="rp-track rp-void" title="${esc('Non mesurable : ' + why)}"></div><div class="rp-n">—</div><div class="rp-n">—</div></div>`;
+    }
+    const segs = u.depth.map((v, i) => {
+      if (!v) return '';
+      const pct = (100 * v) / u.chainActive;
+      const label = pct >= 12 ? `${Math.round(pct)} %` : '';
+      return `<span class="rp-seg r${i}" style="flex:0 0 ${pct.toFixed(2)}%" data-tip="${esc(`${DEPTH_LABELS[i]} · ${hoursLabel(v)} · ${Math.round(pct)} %`)}">${label}</span>`;
+    }).join('');
+    const spanTitle = u.reprised
+      ? `mediane sur ${u.reprised} fil${u.reprised > 1 ? 's repris' : ' repris'} dans la fenetre affichee`
+      : 'aucun fil repris sur la periode';
+    return `<div class="rp-row">${name}
+      <div class="rp-track"${cov < 0.98 ? ` title="${esc(`${Math.round(100 * cov)} % des minutes actives sont rattachables a un fil, le reste vient de fiches sans identifiant de fil`)}"` : ''}>${segs}</div>
+      <div class="rp-n" title="nombre de sessions par conversation">${sessionsPerChain(u).toFixed(2).replace('.', ',')}</div>
+      <div class="rp-n" title="${esc(spanTitle)}">${spanLabel(median(u.spans))}</div></div>`;
+  }).join('');
+
+  const legend = DEPTH_LABELS.map((l, i) => `<span class="lg"><i class="sw r${i}"></i>${esc(l)}</span>`).join('');
+  return `<div class="rp-legend">${legend}</div>
+    <div class="rp"><div class="rp-row rp-head"><div></div><div></div><div class="rp-n">sess./fil</div><div class="rp-n">vie du fil</div></div>${rows}</div>`;
 }
 
 // Reprendre une conversation cree une nouvelle session dont le transcript rejoue l'historique.
@@ -304,8 +446,12 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   const colorOf = new Map(aggregate(allCards).users.map((u, i) => [u.user, i % 5]));
   const everyone = [...colorOf.keys()];
   const cards = selected ? pool.filter(c => c.user === selected) : pool;
-  const { users, days, totals } = aggregate(cards);
-  const botTotals = aggregate(selected ? botCards.filter(c => c.user === selected) : botCards).totals;
+  // Index des fils construit sur les fiches BRUTES du meme perimetre : c'est le nombre de fois qu'on
+  // a rouvert une conversation, donc il se compte AVANT le repli. Le filtre par poste ne le change
+  // pas (un fil appartient a une seule personne), celui des boucles si : leurs fils sont les leurs.
+  const chains = chainIndex(bots ? rawCards : rawCards.filter(c => !c.automated));
+  const { users, days, totals } = aggregate(cards, chains);
+  const botTotals = aggregate(selected ? botCards.filter(c => c.user === selected) : botCards, chains).totals;
   const errRate = totals.tools ? (totals.errors / totals.tools) * 100 : 0;
   // Intensite = temps actif / temps reel couvert. Au-dela de 1, plusieurs sessions tournent en
   // parallele : c'est du travail sur plusieurs sujets a la fois, compte plein, pas un artefact.
@@ -336,10 +482,12 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   :root{color-scheme:light;--plane:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
     --grid:#e1e0d9;--axis:#c3c2b7;--ring:rgba(11,11,11,.10);--crit:#d03b3b;
     --act:#4b4a46;--wai:#a8a69e;--dor:#dcdbd3;
+    --r0:#dcdbd3;--r1:#a8a69e;--r2:#4b4a46;--r0t:#0b0b0b;--r1t:#0b0b0b;--r2t:#f9f9f7;
     --s0:${SERIES_LIGHT[0]};--s1:${SERIES_LIGHT[1]};--s2:${SERIES_LIGHT[2]};--s3:${SERIES_LIGHT[3]};--s4:${SERIES_LIGHT[4]}}
   @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){color-scheme:dark;--plane:#0d0d0d;--surface:#1a1a19;
     --ink:#fff;--ink2:#c3c2b7;--muted:#898781;--grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);
     --act:#e3e8eb;--wai:#6c6b67;--dor:#333330;
+    --r0:#333330;--r1:#6c6b67;--r2:#e3e8eb;--r0t:#fff;--r1t:#fff;--r2t:#0d0d0d;
     --s0:${SERIES_DARK[0]};--s1:${SERIES_DARK[1]};--s2:${SERIES_DARK[2]};--s3:${SERIES_DARK[3]};--s4:${SERIES_DARK[4]}}}
   *{box-sizing:border-box}
   body{margin:0;background:var(--plane);color:var(--ink);
@@ -386,6 +534,22 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   .tb-legend .sw{width:10px;height:10px;border-radius:3px;display:inline-block}
   .sw.act{background:var(--act)}.sw.wai{background:var(--wai)}.sw.dor{background:var(--dor)}
   .tb-dhint{color:var(--muted);font-size:12px;margin-left:auto}
+  .rp{display:flex;flex-direction:column;gap:9px}
+  .rp-row{display:grid;grid-template-columns:130px 1fr 68px 82px;align-items:center;gap:12px}
+  .rp-head{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .rp-name{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rp-track{display:flex;height:20px;border-radius:4px;overflow:hidden;background:var(--grid)}
+  .rp-void{border:1px dashed var(--axis);background:none;height:20px}
+  .rp-seg{height:100%;display:flex;align-items:center;justify-content:center;font-size:11px;
+    font-variant-numeric:tabular-nums;overflow:hidden;min-width:0}
+  .rp-seg:not(:last-child){border-right:2px solid var(--surface)}
+  .rp-seg.r0{background:var(--r0);color:var(--r0t)}
+  .rp-seg.r1{background:var(--r1);color:var(--r1t)}
+  .rp-seg.r2{background:var(--r2);color:var(--r2t)}
+  .rp-n{font-size:13px;text-align:right;font-variant-numeric:tabular-nums;color:var(--ink2)}
+  .rp-legend{display:flex;flex-wrap:wrap;gap:14px;margin-bottom:16px;font-size:13px;color:var(--ink2);align-items:center}
+  .rp-legend .sw{width:10px;height:10px;border-radius:3px;display:inline-block}
+  .sw.r0{background:var(--r0)}.sw.r1{background:var(--r1)}.sw.r2{background:var(--r2)}
   table{width:100%;border-collapse:collapse;font-size:13px}
   th{text-align:left;font-weight:600;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em;
     padding:0 10px 8px 0;border-bottom:1px solid var(--grid)}
@@ -432,6 +596,8 @@ ${capteurs.stale.length ? `<div class="warn"><b>Capteur en retard sur ${capteurs
     ${tile('Temps actif', hoursLabel(totals.active), 'on produit, gaps > 5 min exclus')}
     ${tile('Temps machine', hoursLabel(totals.active + totals.wait), 'actif + attente / review')}
     ${tile('Intensite', intensity ? intensity.toFixed(2).replace('.', ',') + '×' : '—', intensity ? `sessions en parallele, sur ${intensityCov} % de l'actif` : 'non calculable sur cette fenetre')}
+    ${tile('Conversations', totals.chains ? nf(totals.chains) : '—', totals.chains ? `${sessionsPerChain(totals).toFixed(2).replace('.', ',')} sessions par fil` : 'fils non identifies')}
+    ${tile('Compactions', totals.compactSessions ? nf(totals.compactions) : '—', totals.compactSessions ? `${totals.compactions ? Math.round((100 * totals.compactAuto) / totals.compactions) + ' % subies' : 'aucun contexte sature'}` : 'pas encore mesure')}
     ${tile('Relances humaines', nf(totals.prompts), totals.sessions ? `${(totals.prompts / totals.sessions).toFixed(1)} par session` : '')}
     ${tile('Frictions', nf(totals.frictions), 'prompts marques')}
     ${tile('Appels d\'outils', nf(totals.tools), `${errRate.toFixed(1)} % d'erreurs`)}
@@ -440,7 +606,7 @@ ${capteurs.stale.length ? `<div class="warn"><b>Capteur en retard sur ${capteurs
   </div>
   <p class="note"><b>Temps actif</b> = le temps ou une machine que vous avez lancee produit vraiment (l'IA enchaine, vous ecrivez), les silences de plus de 5 min exclus. Il mesure l'<b>intensite de collaboration</b>, pas les heures de presence. Deux sessions actives a la meme minute comptent double : travailler sur plusieurs sujets en parallele compte plein. Un poste au temps actif faible n'a pas moins travaille : il sollicite l'IA par a-coups (voir la part d'attente ci-dessous).</p>
   <p class="note"><b>Outils par appel</b> = combien d'actions l'IA groupe dans un seul message, au lieu de les demander l'une apres l'autre. Lire trois fichiers d'un coup coute une attente ; les lire en trois messages en coute trois. Un aller-retour de plus prend environ 9,5 s, un outil de plus dans le meme message environ 0,8 s. Plus le chiffre monte, moins on attend pour le meme travail. Rien a voir avec la densite ci-dessous, qui compte des sessions en parallele.${totals.batch.sessions && totals.batch.sessions < totals.sessions ? ` Mesure sur ${nf(totals.batch.sessions)} des ${nf(totals.sessions)} sessions : les fiches emises avant l'ajout de la mesure ne la portent pas.` : ''}</p>
-  ${folded ? `<p class="note">${nf(folded)} session(s) repliee(s) : ce sont des reprises d'une meme conversation, dont le transcript rejoue l'historique. Sans ce repli, le meme travail serait compte plusieurs fois.</p>` : ''}
+  ${folded ? `<p class="note">${nf(folded)} session(s) repliee(s) : ce sont des reprises d'une meme conversation, dont le transcript rejoue l'historique. Sans ce repli, le meme travail serait compte plusieurs fois. Les reouvertures restent comptees comme telles plus bas, dans "Reprises de conversation" : replier des minutes n'efface pas le geste.</p>` : ''}
   ${botTotals.sessions ? `<p class="note">${nf(botTotals.sessions)} sessions automatiques (boucles d'amelioration, juge, digest) exclues de ces chiffres. Leur cout : ${nf(botTotals.tokens)} tokens, ${hoursLabel(botTotals.active)}. <a href="${q(selected)}${bots ? '' : '&bots=1'}" class="ulink">${bots ? 'les masquer' : 'les afficher'}</a>.</p>` : ''}
 </section>
 
@@ -457,13 +623,20 @@ ${capteurs.stale.length ? `<div class="warn"><b>Capteur en retard sur ${capteurs
 </section>
 
 <section>
+  <h2>Reprises de conversation</h2>
+  ${repriseChart(users, colorOf)}
+  <p class="cap">Rouvrir une conversation plutot qu'en ouvrir une neuve est un style de travail, pas un defaut : on garde le contexte, mais il s'alourdit et finit par etre compacte. Chaque barre vaut 100 % du temps actif du poste, repartie selon le nombre de fois ou la conversation a ete rouverte. <b>Sess./fil</b> = sessions par conversation. <b>Vie du fil</b> = duree entre la premiere et la derniere session d'une conversation reprise, en mediane. Les fils qui debordent de la fenetre affichee y sont tronques : on ne voit que les reouvertures qui tombent dedans.</p>
+</section>
+
+<section>
   <h2>Par poste</h2>
   <div class="scroll"><table>
-    <tr><th>Poste</th><th class="num">Sessions</th><th class="num">Temps actif</th><th class="num">Attente</th><th class="num" title="temps actif / temps reel : > 1 = sessions en parallele">Densite</th><th class="num">Relances</th>
-      <th class="num">Frictions</th><th class="num">Outils</th><th class="num" title="outils groupes dans un meme appel API : plus c'est haut, moins on paie d'allers-retours">Outils/appel</th><th class="num">Erreurs</th><th class="num">Tokens</th><th>Surface</th><th title="commit du capteur installe sur le poste">Capteur</th><th>Projets</th></tr>
+    <tr><th>Poste</th><th class="num">Sessions</th><th class="num" title="sessions par conversation : 1,00 = une conversation neuve a chaque fois">Sess./fil</th><th class="num">Temps actif</th><th class="num">Attente</th><th class="num" title="temps actif / temps reel : > 1 = sessions en parallele">Densite</th><th class="num">Relances</th>
+      <th class="num">Frictions</th><th class="num">Outils</th><th class="num" title="outils groupes dans un meme appel API : plus c'est haut, moins on paie d'allers-retours">Outils/appel</th><th class="num">Erreurs</th><th class="num" title="fois ou le contexte a ete replie faute de place : signal de sante d'une session, pas de volume">Compactions</th><th class="num">Tokens</th><th>Surface</th><th title="commit du capteur installe sur le poste">Capteur</th><th>Projets</th></tr>
     ${users.map(u => `<tr>
       <td><span class="who"><i style="background:var(--s${colorOf.get(u.user) ?? 0})"></i><a class="ulink" href="?days=${windowDays}&user=${encodeURIComponent(u.user)}">${esc(u.user)}</a></span>${u.scoped ? '<span class="scoped" title="Ce poste ne remonte qu\'une partie de ses sessions (perimetre restreint)">perimetre restreint</span>' : ''}</td>
       <td class="num">${nf(u.sessions)}</td>
+      <td class="num"${u.chains ? ` title="${esc(`${nf(u.chains)} conversation(s), dont ${nf(u.reprised)} reprise(s)`)}"` : ' title="aucune fiche de ce poste ne porte l\'identifiant de fil"'}>${u.chains ? sessionsPerChain(u).toFixed(2).replace('.', ',') : '—'}</td>
       <td class="num">${hoursLabel(u.active)}</td>
       <td class="num">${hoursLabel(u.wait)}</td>
       <td class="num" title="${esc(densTitle(u))}">${densLabel(u)}</td>
@@ -472,6 +645,7 @@ ${capteurs.stale.length ? `<div class="warn"><b>Capteur en retard sur ${capteurs
       <td class="num">${nf(u.tools)}</td>
       <td class="num"${u.batch.calls ? ` title="${monoPct(u.batch).toFixed(0)} % des appels ne portent qu'un seul outil, sur ${nf(u.batch.sessions)} session(s) mesuree(s)"` : ''}>${perCallLabel(u.batch)}</td>
       <td class="num">${u.tools ? ((u.errors / u.tools) * 100).toFixed(1) + ' %' : '—'}</td>
+      <td class="num"${u.compactSessions ? ` title="${esc(`dont ${nf(u.compactAuto)} subie(s) (contexte sature), mesure sur ${nf(u.compactSessions)} des ${nf(u.sessions)} sessions`)}"` : ' title="aucune fiche de ce poste ne porte encore la mesure"'}>${u.compactSessions ? nf(u.compactions) : '—'}</td>
       <td class="num">${nf(u.tokens)}</td>
       <td class="tag">${esc([...u.surfaces].sort().join(', ') || '—')}</td>
       <td class="tag">${capteurCell(capteurs, u.user)}</td>
