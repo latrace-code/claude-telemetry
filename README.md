@@ -153,6 +153,21 @@ client rescanne les transcripts des 7 derniers jours et enfile ce qui n'est jama
 run, sessions inactives depuis plus de 30 min). C'est le seul filet : contrairement au poste de
 Lucas, on ne peut pas rejouer l'historique d'un poste à distance.
 
+Quand la lib d'analyse est corrigée, les fiches déjà envoyées restent fausses et le poste ne les
+renverra jamais (son index `sent.json` les croit faites). C'est `tools/recompute-from-bucket.mjs`
+qui les rejoue depuis les transcripts stockés :
+
+```bash
+node tools/recompute-from-bucket.mjs --user tom --dry            # contrôler avant d'écrire
+node tools/recompute-from-bucket.mjs --user lucas --since 2026-07-18 --until 2026-07-19
+```
+
+Compter ~4 s par session : le coût est un démarrage de `gcloud` par fichier, pas du calcul. `--since`
+sert à rejouer d'abord la fenêtre qu'on regarde ; `--until` (borne haute, exclue) découpe une passe
+longue en tranches de dates **disjointes** qu'on lance en parallèle, une fiche n'appartenant alors
+qu'à une seule tranche. Sans ça, les ~1 600 sessions d'un poste CLI tiennent une heure et demie de
+file d'attente.
+
 ## Notes de terrain
 
 - Sur ce projet GCP, le frontend Google intercepte `/` et `/healthz` et rend son propre 404 sans que
