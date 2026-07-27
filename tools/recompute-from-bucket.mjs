@@ -5,11 +5,16 @@
 // le poste ne les renverra jamais (son index `sent.json` les considere comme faites). Comme les
 // transcripts bruts sont conserves, on peut tout rejouer sans toucher a la machine de personne.
 //
-//   node tools/recompute-from-bucket.mjs --user mathilde [--since 2026-07-20] [--dry]
+//   node tools/recompute-from-bucket.mjs --user mathilde [--since 2026-07-20] [--until 2026-07-25] [--dry]
 //
 // Compter ~4 s par session : le temps part en demarrages de gcloud, pas en calcul. Sur un poste qui
 // a des centaines de sessions stockees, passer `--since` pour rejouer d'abord la fenetre qu'on
 // regarde (le cockpit s'ouvre sur 7 ou 30 jours) plutot que d'attendre tout l'historique.
+//
+// `--until` (borne haute, exclue) sert a decouper une passe longue en tranches de dates DISJOINTES
+// qu'on lance en parallele : une fiche est ecrite par une seule tranche, donc pas de course. C'est
+// le seul moyen de rejouer les ~1 600 sessions d'un poste CLI ailleurs qu'en une heure et demie de
+// file d'attente, puisque le cout est un demarrage de gcloud par fichier et pas du calcul.
 
 import * as fs from 'node:fs';
 import { readFileSync, mkdtempSync, rmSync, existsSync, readdirSync, createReadStream, createWriteStream } from 'node:fs';
@@ -24,9 +29,10 @@ import { analyzeTranscript, readEvents, scanSidechains } from '../client/telemet
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i > -1 ? process.argv[i + 1] : d; };
 const user = arg('user');
 const since = arg('since', '0000-00-00');
+const until = arg('until', '9999-99-99');
 const dry = process.argv.includes('--dry');
 const bucket = process.env.LATRACE_TELEMETRY_BUCKET || 'latrace-claude-telemetry';
-if (!user) { console.error('usage: --user <nom> [--dry]'); process.exit(1); }
+if (!user) { console.error('usage: --user <nom> [--since AAAA-MM-JJ] [--until AAAA-MM-JJ] [--dry]'); process.exit(1); }
 
 const cfg = JSON.parse(readFileSync(join(process.env.HOME, '.latrace-telemetry', 'config.json'), 'utf8'));
 
@@ -38,7 +44,7 @@ for (const line of gs('ls', '-r', `gs://${bucket}/transcripts/${user}/`).split('
   const m = line.trim().match(/^gs:\/\/[^/]+\/transcripts\/[^/]+\/(\d{4}-\d{2}-\d{2})\/([^/]+)\/(.+)\.gz$/);
   if (!m) continue;
   const [, date, sid, rel] = m;
-  if (date < since) continue;
+  if (date < since || date >= until) continue;
   if (!sessions.has(sid)) sessions.set(sid, { sid, date, files: [] });
   sessions.get(sid).files.push({ rel, url: line.trim() });
 }
