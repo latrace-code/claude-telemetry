@@ -427,14 +427,22 @@ function capteurCell(state, user) {
   return `<span class="stale" title="Ce poste tourne une version du capteur plus ancienne que ${esc(state.ref)} : ses fiches arrivent sans les mesures ajoutees depuis. Voir la procedure de resynchronisation dans le README.">${esc(label)} · en retard</span>`;
 }
 
+// Une boucle se reconnait a son flag, POSE PAR LA LIB AU MOMENT DE LA FICHE... donc absent de tout
+// ce qui a ete calcule avant le correctif du 27/07. Le cockpit ne peut pas s'y fier seul : il lit un
+// historique de plusieurs milliers de fiches ou 318 boucles de Lucas sur 14 jours portent encore
+// `automated: false`. On re-teste donc la surface ici, ce qui rend l'affichage juste sans attendre
+// un rejeu du corpus. A garder meme apres un rejeu : deux gardes valent mieux qu'une sur le chiffre
+// qui sert de denominateur a tous les autres.
+const isBot = c => c.automated || c.entrypoint === 'sdk-cli';
+
 export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '', user: selected = '', bots = false } = {}) {
   // Les boucles automatiques (juge de friction, mineur nocturne, digest du soir) ne sont pas du
   // travail humain : elles n'ont ni relance ni friction, durent 0 minute, et sur un poste qui en
   // fait tourner beaucoup elles NOIENT les vraies sessions. Ecartees par defaut, jamais jetees :
   // leur cout est reel et reste affiche a part.
   const { cards: allCards, folded } = foldChains(rawCards);
-  const botCards = allCards.filter(c => c.automated);
-  const humanCards = allCards.filter(c => !c.automated);
+  const botCards = allCards.filter(isBot);
+  const humanCards = allCards.filter(c => !isBot(c));
   const pool = bots ? allCards : humanCards;
 
   // Les couleurs sont assignees sur la population COMPLETE : filtrer sur une personne ne doit pas
@@ -449,7 +457,7 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   // Index des fils construit sur les fiches BRUTES du meme perimetre : c'est le nombre de fois qu'on
   // a rouvert une conversation, donc il se compte AVANT le repli. Le filtre par poste ne le change
   // pas (un fil appartient a une seule personne), celui des boucles si : leurs fils sont les leurs.
-  const chains = chainIndex(bots ? rawCards : rawCards.filter(c => !c.automated));
+  const chains = chainIndex(bots ? rawCards : rawCards.filter(c => !isBot(c)));
   const { users, days, totals } = aggregate(cards, chains);
   const botTotals = aggregate(selected ? botCards.filter(c => c.user === selected) : botCards, chains).totals;
   const errRate = totals.tools ? (totals.errors / totals.tools) * 100 : 0;
@@ -607,7 +615,7 @@ ${capteurs.stale.length ? `<div class="warn"><b>Capteur en retard sur ${capteurs
   <p class="note"><b>Temps actif</b> = le temps ou une machine que vous avez lancee produit vraiment (l'IA enchaine, vous ecrivez), les silences de plus de 5 min exclus. Il mesure l'<b>intensite de collaboration</b>, pas les heures de presence. Deux sessions actives a la meme minute comptent double : travailler sur plusieurs sujets en parallele compte plein. Un poste au temps actif faible n'a pas moins travaille : il sollicite l'IA par a-coups (voir la part d'attente ci-dessous).</p>
   <p class="note"><b>Outils par appel</b> = combien d'actions l'IA groupe dans un seul message, au lieu de les demander l'une apres l'autre. Lire trois fichiers d'un coup coute une attente ; les lire en trois messages en coute trois. Un aller-retour de plus prend environ 9,5 s, un outil de plus dans le meme message environ 0,8 s. Plus le chiffre monte, moins on attend pour le meme travail. Rien a voir avec la densite ci-dessous, qui compte des sessions en parallele.${totals.batch.sessions && totals.batch.sessions < totals.sessions ? ` Mesure sur ${nf(totals.batch.sessions)} des ${nf(totals.sessions)} sessions : les fiches emises avant l'ajout de la mesure ne la portent pas.` : ''}</p>
   ${folded ? `<p class="note">${nf(folded)} session(s) repliee(s) : ce sont des reprises d'une meme conversation, dont le transcript rejoue l'historique. Sans ce repli, le meme travail serait compte plusieurs fois. Les reouvertures restent comptees comme telles plus bas, dans "Reprises de conversation" : replier des minutes n'efface pas le geste.</p>` : ''}
-  ${botTotals.sessions ? `<p class="note">${nf(botTotals.sessions)} sessions automatiques (boucles d'amelioration, juge, digest) exclues de ces chiffres. Leur cout : ${nf(botTotals.tokens)} tokens, ${hoursLabel(botTotals.active)}. <a href="${q(selected)}${bots ? '' : '&bots=1'}" class="ulink">${bots ? 'les masquer' : 'les afficher'}</a>.</p>` : ''}
+  ${botTotals.sessions ? `<p class="note">${nf(botTotals.sessions)} sessions automatiques (agents headless, boucles d'amelioration, juge, digest) exclues de ces chiffres. Leur cout : ${nf(botTotals.tokens)} tokens, ${hoursLabel(botTotals.active)}. <a href="${q(selected)}${bots ? '' : '&bots=1'}" class="ulink">${bots ? 'les masquer' : 'les afficher'}</a>.</p>` : ''}
 </section>
 
 <section>

@@ -494,7 +494,17 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     n_dormant: nDormant,
     user_prompts: userPrompts,
     bot_prompts: botPrompts,
-    automated: userPrompts === 0 && botPrompts > 0,
+    // Deux facons d'etre une boucle, et il FAUT les deux.
+    //   1. Aucun prompt humain : le cas propre, quand RE_NOT_HUMAN a reconnu le prompt.
+    //   2. `sdk-cli`, la surface des agents headless (`claude -p`). C'est le filet, et il est
+    //      indispensable : une boucle dont le 1er prompt ressemble a une consigne humaine echappe
+    //      a RE_NOT_HUMAN et repart en travail humain. Mesure du 27/07 : 318 des 504 sessions
+    //      "humaines" de Lucas sur 14 jours etaient des boucles (ao-watch, sales-police, bench),
+    //      soit un denominateur gonfle d'un facteur 3 et TOUS ses taux dilues, friction comprise.
+    //      Le biais ne touchait que lui, donc il faussait aussi la comparaison entre postes.
+    // Le critere de surface ne demande aucune liste a maintenir : c'est ce qui le rend durable,
+    // la liste de motifs ayant deja rate deux vagues de boucles ajoutees apres elle.
+    automated: (userPrompts === 0 && botPrompts > 0) || entrypoint === 'sdk-cli',
     assistant_turns: assistantTurns,
     tools_total: toolsTotal,
     tool_errors: toolErrors,
