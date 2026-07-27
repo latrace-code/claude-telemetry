@@ -49,15 +49,50 @@ function perCall(b) { return b.calls ? b.tools / b.calls : 0; }
 function perCallLabel(b) { return b.calls ? perCall(b).toFixed(2).replace('.', ',') : '—'; }
 function monoPct(b) { return b.calls ? (100 * b.single) / b.calls : 0; }
 
+// Ventilation du temps actif d'une fiche sur les jours qui l'ont produit. Rend [[jour, minutes]].
+// Une session de plusieurs jours (les reprises Desktop courent jusqu'a 22 jours) voyait tout son
+// actif impute a sa date de DEBUT : le travail etait donc date n'importe ou dans la fenetre. Les
+// fiches en schema >= 6 portent `active_by_day` ; les anciennes n'ont que leur date de debut, on la
+// garde en repli plutot que d'inventer une repartition.
+function spreadActive(card, active) {
+  const abd = card.active_by_day;
+  if (abd && active > 0) {
+    const days = Object.entries(abd).filter(([, v]) => v > 0);
+    const sum = days.reduce((s, [, v]) => s + v, 0);
+    // Les minutes par jour sont des arrondis : on les traite en POIDS pour que le total reste egal
+    // a `active_min`, sinon la somme du graphe cesse de coller aux tuiles.
+    if (sum > 0) return days.map(([day, v]) => [day, (active * v) / sum]);
+  }
+  return [[card.date || '', active]];
+}
+
+// Une fenetre de travail n'est connue QUE si la session est restee continue : sans dormant, et avec
+// une duree d'horloge egale a actif + attente. Sinon on ignore ou le travail se place dans le span
+// (les longues sessions Desktop s'etalent sur des jours), et l'approximation contigue depuis le
+// debut fabriquait un denominateur faux : chez tom elle affichait 0,37x pour un parallelisme reel
+// autour de 1,4x. Une densite se calcule donc sur ce sous-ensemble, ou pas du tout.
+function workWindow(card, active, wait, dormant) {
+  const startMs = card.ts_start ? Date.parse(card.ts_start) : null;
+  const endMs = card.ts_end ? Date.parse(card.ts_end) : null;
+  const work = active + wait;
+  if (startMs === null || endMs === null || work <= 0 || dormant > 0) return null;
+  const span = (endMs - startMs) / 60000;
+  if (Math.abs(span - work) > Math.max(2, 0.05 * work)) return null;
+  return [startMs, endMs];
+}
+
+// En dessous de cette part du temps actif couverte par des fenetres connues, la densite ne dit plus
+// rien du poste : on n'affiche rien plutot qu'un chiffre calcule sur une minorite de son travail.
+const DENSITY_MIN_COVERAGE = 0.6;
+
 function aggregate(cards) {
   const byUser = new Map();
   const byDay = new Map();
-  const totals = { sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, batch: { ...ZERO_BATCH } };
+  const totals = { sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, batch: { ...ZERO_BATCH }, covActive: 0 };
   const allIv = [];
 
   for (const c of cards) {
     const u = c.user || 'inconnu';
-    const d = c.date || '';
     // Clamp : de vieilles fiches portent un actif negatif (transcript non chronologique, -70h vu sur
     // un poste). La lib est corrigee, mais le bucket garde l'ancienne valeur jusqu'au recompute.
     const active = Math.max(0, c.active_min || 0);
@@ -65,14 +100,9 @@ function aggregate(cards) {
     const dormant = Math.max(0, c.dormant_min || 0);
     const wall = Math.max(0, c.wall_min || 0);
     const fr = (c.signals && c.signals.friction) || 0;
-    // Fenetre de TRAVAIL (pas le wall) : on ampute le dormant, sinon une session laissee ouverte 3 h
-    // dilue le denominateur et ecrase la densite. Approximee contigue depuis le debut (le dormant est
-    // presque toujours en fin de session). Denominateur = temps d'horloge reellement travaille.
-    const work = active + wait;
-    const startMs = c.ts_start ? Date.parse(c.ts_start) : null;
-    const iv = (startMs !== null && work > 0) ? [startMs, startMs + work * 60000] : null;
+    const iv = workWindow(c, active, wait, dormant);
 
-    if (!byUser.has(u)) byUser.set(u, { user: u, sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, batch: { ...ZERO_BATCH }, projects: new Set(), surfaces: new Set(), scoped: false, iv: [] });
+    if (!byUser.has(u)) byUser.set(u, { user: u, sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, batch: { ...ZERO_BATCH }, projects: new Set(), surfaces: new Set(), scoped: false, iv: [], covActive: 0 });
     const U = byUser.get(u);
     addBatch(U.batch, c);
     addBatch(totals.batch, c);
@@ -85,12 +115,14 @@ function aggregate(cards) {
     if (c.project) U.projects.add(c.project);
     if (c.entrypoint) U.surfaces.add(c.entrypoint);
     if (c.scoped) U.scoped = true;
-    if (iv) { U.iv.push(iv); allIv.push(iv); }
+    if (iv) { U.iv.push(iv); allIv.push(iv); U.covActive += active; totals.covActive += active; }
 
-    if (!byDay.has(d)) byDay.set(d, { date: d, users: new Map(), total: 0 });
-    const D = byDay.get(d);
-    D.users.set(u, (D.users.get(u) || 0) + active);
-    D.total += active;
+    for (const [day, min] of spreadActive(c, active)) {
+      if (!byDay.has(day)) byDay.set(day, { date: day, users: new Map(), total: 0 });
+      const D = byDay.get(day);
+      D.users.set(u, (D.users.get(u) || 0) + min);
+      D.total += min;
+    }
 
     totals.sessions++; totals.active += active; totals.wait += wait; totals.dormant += dormant; totals.wall += wall;
     totals.prompts += c.user_prompts || 0; totals.frictions += fr;
@@ -139,8 +171,21 @@ function stackedChart(days, users, colorOf) {
 // Densite = temps actif / temps reel couvert (union des fenetres). >1 : plusieurs sessions actives
 // en meme temps, c'est du travail parallele, pas un artefact. <1 : sessions etalees, longues pauses
 // entre deux sollicitations (on code a la main, on reflechit). Caracterise un STYLE, sans le juger.
-function density(u) { return u.covered > 0 ? u.active / u.covered : 0; }
+// Numerateur ET denominateur portent sur le MEME sous-ensemble : les sessions dont la fenetre de
+// travail est connue (workWindow). Melanger l'actif total avec un denominateur partiel rendrait un
+// ratio arbitraire, ce qui etait exactement le bug precedent.
+function density(u) {
+  if (!u.covered || !u.active) return 0;
+  if (u.covActive / u.active < DENSITY_MIN_COVERAGE) return 0;
+  return u.covActive / u.covered;
+}
 function densLabel(u) { const d = density(u); return d ? d.toFixed(2).replace('.', ',') + '×' : '—'; }
+function densTitle(u) {
+  const pct = u.active ? Math.round((100 * u.covActive) / u.active) : 0;
+  return density(u)
+    ? `sessions en parallele, calcule sur ${pct} % du temps actif (sessions continues)`
+    : `non calculable : seules ${pct} % des minutes actives viennent de sessions dont la fenetre de travail est connue`;
+}
 
 // Ou part le temps de chaque poste : actif (on produit), attente/review (l'IA a rendu la main, on
 // lit ou on est parti), dormant (session laissee ouverte > 90 min). Repond a "un petit temps actif
@@ -156,7 +201,7 @@ function timeBreakdown(users, colorOf) {
       <div class="tb-name"><span class="who"><i style="background:var(--s${colorOf.get(u.user) ?? 0})"></i>${esc(u.user)}</span></div>
       <div class="tb-track" style="width:${(tot / maxTot * 100).toFixed(2)}%">
         ${seg(u.active, 'act', 'actif')}${seg(u.wait, 'wai', 'attente / review')}${seg(u.dormant, 'dor', 'dormant')}</div>
-      <div class="tb-dens" title="temps actif / temps reel couvert : au-dela de 1, des sessions tournent en parallele">${densLabel(u)}</div>
+      <div class="tb-dens" title="${esc(densTitle(u))}">${densLabel(u)}</div>
     </div>`;
   }).join('');
   return `<div class="tb-legend"><span class="lg"><i class="sw act"></i>actif</span><span class="lg"><i class="sw wai"></i>attente / review</span><span class="lg"><i class="sw dor"></i>dormant (session ouverte)</span><span class="lg tb-dhint">colonne de droite : densite (sessions en parallele)</span></div>
@@ -171,6 +216,12 @@ function timeBreakdown(users, colorOf) {
 //     fiches se recouvrent a 97-98 %. Mesure sur un poste reel : 4 fiches pour une seule
 //     conversation. Dans ce cas on ne garde que la plus complete.
 // `chain_id` (l'uuid du premier message) identifie le fil dans les deux cas.
+//
+// Le tri se fait FICHE PAR FICHE, jamais par groupe : un meme fil melange les deux formes. La regle
+// precedente gardait tout le groupe des qu'UNE fiche portait `inherited_events`, et laissait donc
+// passer les fiches reetiquetees qui, elles, se recopient. Mesure sur le fil a1d2e8db de tom
+// (5 fiches, inherited [3577, 0, 824, 0, 0]) : 1 375 min comptees pour 1 093 min de travail reel.
+// Corrige, le repli rend +0,4 % contre la verite terrain du poste au lieu de +3,0 %.
 function foldChains(cards) {
   const byChain = new Map();
   const out = [];
@@ -181,12 +232,57 @@ function foldChains(cards) {
   }
   let folded = 0;
   for (const group of byChain.values()) {
-    if (group.length === 1 || group.some(c => (c.inherited_events || 0) > 0)) { out.push(...group); continue; }
-    const weight = c => (c.tools_total || 0) + (c.user_prompts || 0);
-    out.push(group.reduce((a, b) => (weight(b) > weight(a) ? b : a)));
-    folded += group.length - 1;
+    if (group.length === 1) { out.push(...group); continue; }
+    const deduped = group.filter(c => (c.inherited_events || 0) > 0);
+    const replayed = group.filter(c => !(c.inherited_events || 0));
+    out.push(...deduped);
+    if (replayed.length) {
+      const weight = c => (c.tools_total || 0) + (c.user_prompts || 0);
+      out.push(replayed.reduce((a, b) => (weight(b) > weight(a) ? b : a)));
+      folded += replayed.length - 1;
+    }
   }
   return { cards: out, folded };
+}
+
+// QUELLE VERSION DU CAPTEUR TOURNE SUR CHAQUE POSTE.
+// Claude Code n'auto-update PAS un marketplace tiers : `autoUpdate` vaut false par defaut hors des
+// marketplaces Anthropic, et un plugin installe reste epingle au commit du jour de l'installation.
+// Un poste peut donc rester gele des semaines. Le symptome est muet : ses fiches continuent
+// d'arriver, simplement sans les champs ajoutes depuis. C'est arrive du 22 au 27/07 sur les quatre
+// postes, decouvert par hasard. On rend donc la panne visible sans avoir a la chercher.
+// La reference n'est pas une constante a maintenir : c'est le commit du poste qui a emis la fiche la
+// plus recente. Des qu'un seul poste passe a une nouvelle version, les autres sortent en retard.
+// On compare des sha, donc par egalite : deux sha ne s'ordonnent pas, mais "different du plus
+// recent" suffit a dire "n'a pas suivi". Ne PAS utiliser `schema` pour ca, recompute-from-bucket le
+// reecrit avec la lib de la machine qui rejoue et masquerait justement le gel.
+function capteurState(cards) {
+  const latest = new Map();
+  let ref = null;
+  for (const c of cards) {
+    const ts = String(c.ts_start || c.date || '');
+    const u = c.user || 'inconnu';
+    const prev = latest.get(u);
+    if (!prev || ts > prev.ts) latest.set(u, { ts, version: c.plugin_version || null });
+    if (c.plugin_version && (!ref || ts > ref.ts)) ref = { ts, version: c.plugin_version };
+  }
+  const byUser = new Map();
+  const stale = [];
+  for (const [u, v] of latest) {
+    const isStale = !!ref && v.version !== ref.version;
+    byUser.set(u, { version: v.version, stale: isStale });
+    if (isStale) stale.push(u);
+  }
+  return { ref: ref ? ref.version : null, byUser, stale: stale.sort() };
+}
+
+function capteurCell(state, user) {
+  const s = state.byUser.get(user);
+  if (!s) return '<span class="dim">—</span>';
+  if (!state.ref) return '<span class="dim">—</span>';
+  if (!s.stale) return `<span class="dim" title="a jour">${esc(s.version || '—')}</span>`;
+  const label = s.version || 'avant le suivi';
+  return `<span class="stale" title="Ce poste tourne une version du capteur plus ancienne que ${esc(state.ref)} : ses fiches arrivent sans les mesures ajoutees depuis. Voir la procedure de resynchronisation dans le README.">${esc(label)} · en retard</span>`;
 }
 
 export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '', user: selected = '', bots = false } = {}) {
@@ -201,6 +297,10 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
 
   // Les couleurs sont assignees sur la population COMPLETE : filtrer sur une personne ne doit pas
   // repeindre les autres d'une vue a l'autre (la couleur suit l'entite, jamais son rang).
+  // Etat des capteurs : calcule sur TOUT le corpus, boucles comprises. Une fiche de boucle vient de
+  // la meme machine et dit donc la meme version, et le filtre par poste ne doit pas cacher qu'un
+  // AUTRE poste est gele : la banniere parle de la flotte.
+  const capteurs = capteurState(allCards);
   const colorOf = new Map(aggregate(allCards).users.map((u, i) => [u.user, i % 5]));
   const everyone = [...colorOf.keys()];
   const cards = selected ? pool.filter(c => c.user === selected) : pool;
@@ -209,7 +309,10 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   const errRate = totals.tools ? (totals.errors / totals.tools) * 100 : 0;
   // Intensite = temps actif / temps reel couvert. Au-dela de 1, plusieurs sessions tournent en
   // parallele : c'est du travail sur plusieurs sujets a la fois, compte plein, pas un artefact.
-  const intensity = totals.covered ? totals.active / totals.covered : 0;
+  // Meme regle que la densite par poste : calculee sur les seules sessions dont la fenetre de
+  // travail est connue, et pas affichee du tout si elles ne couvrent pas l'essentiel de l'actif.
+  const intensity = density(totals);
+  const intensityCov = totals.active ? Math.round((100 * totals.covActive) / totals.active) : 0;
 
   const recent = [...cards].sort((a, b) => String(b.ts_start).localeCompare(String(a.ts_start))).slice(0, 60);
   const frictions = cards
@@ -294,6 +397,12 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   .subj{color:var(--ink2);max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .tag{font-size:11px;color:var(--muted);white-space:nowrap}
   .alert{color:var(--crit);font-weight:600}
+  .dim{color:var(--muted)}
+  .stale{color:var(--crit);font-weight:600;cursor:help}
+  .warn{border:1px solid var(--crit);border-left-width:3px;border-radius:6px;padding:12px 14px;margin-bottom:26px;
+    font-size:13px;line-height:1.55;color:var(--ink2)}
+  .warn b{color:var(--crit)}
+  .warn code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
   .fr{border-left:2px solid var(--crit);padding:2px 0 2px 12px;margin-bottom:14px}
   .fr-m{font-size:11px;color:var(--muted);margin-bottom:2px}
   .empty{color:var(--muted);font-size:13px;margin:0}
@@ -312,13 +421,17 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   <div class="filters">${userLinks}<div class="ranges">${rangeLinks}</div></div>
 </header>
 
+${capteurs.stale.length ? `<div class="warn"><b>Capteur en retard sur ${capteurs.stale.length} poste${capteurs.stale.length > 1 ? 's' : ''} : ${esc(capteurs.stale.join(', '))}.</b>
+  Ces postes tournent une version anterieure a <code>${esc(capteurs.ref)}</code> : leurs fiches arrivent sans les mesures ajoutees depuis, et tout correctif pousse sur le depot ne les atteint pas.
+  Claude Code ne met pas a jour un marketplace tiers tout seul. Resynchronisation : une commande a passer une fois sur le poste, decrite dans le README du depot.</div>` : ''}
+
 <section>
   <h2>Vue d'ensemble</h2>
   <div class="tiles">
     ${tile('Sessions', nf(totals.sessions), `${users.length} poste${users.length > 1 ? 's' : ''}`)}
     ${tile('Temps actif', hoursLabel(totals.active), 'on produit, gaps > 5 min exclus')}
     ${tile('Temps machine', hoursLabel(totals.active + totals.wait), 'actif + attente / review')}
-    ${tile('Intensite', intensity ? intensity.toFixed(2).replace('.', ',') + '×' : '—', 'sessions en parallele')}
+    ${tile('Intensite', intensity ? intensity.toFixed(2).replace('.', ',') + '×' : '—', intensity ? `sessions en parallele, sur ${intensityCov} % de l'actif` : 'non calculable sur cette fenetre')}
     ${tile('Relances humaines', nf(totals.prompts), totals.sessions ? `${(totals.prompts / totals.sessions).toFixed(1)} par session` : '')}
     ${tile('Frictions', nf(totals.frictions), 'prompts marques')}
     ${tile('Appels d\'outils', nf(totals.tools), `${errRate.toFixed(1)} % d'erreurs`)}
@@ -347,13 +460,13 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   <h2>Par poste</h2>
   <div class="scroll"><table>
     <tr><th>Poste</th><th class="num">Sessions</th><th class="num">Temps actif</th><th class="num">Attente</th><th class="num" title="temps actif / temps reel : > 1 = sessions en parallele">Densite</th><th class="num">Relances</th>
-      <th class="num">Frictions</th><th class="num">Outils</th><th class="num" title="outils groupes dans un meme appel API : plus c'est haut, moins on paie d'allers-retours">Outils/appel</th><th class="num">Erreurs</th><th class="num">Tokens</th><th>Surface</th><th>Projets</th></tr>
+      <th class="num">Frictions</th><th class="num">Outils</th><th class="num" title="outils groupes dans un meme appel API : plus c'est haut, moins on paie d'allers-retours">Outils/appel</th><th class="num">Erreurs</th><th class="num">Tokens</th><th>Surface</th><th title="commit du capteur installe sur le poste">Capteur</th><th>Projets</th></tr>
     ${users.map(u => `<tr>
       <td><span class="who"><i style="background:var(--s${colorOf.get(u.user) ?? 0})"></i><a class="ulink" href="?days=${windowDays}&user=${encodeURIComponent(u.user)}">${esc(u.user)}</a></span>${u.scoped ? '<span class="scoped" title="Ce poste ne remonte qu\'une partie de ses sessions (perimetre restreint)">perimetre restreint</span>' : ''}</td>
       <td class="num">${nf(u.sessions)}</td>
       <td class="num">${hoursLabel(u.active)}</td>
       <td class="num">${hoursLabel(u.wait)}</td>
-      <td class="num" title="sessions en parallele">${densLabel(u)}</td>
+      <td class="num" title="${esc(densTitle(u))}">${densLabel(u)}</td>
       <td class="num">${nf(u.prompts)}</td>
       <td class="num${u.frictions ? ' alert' : ''}">${nf(u.frictions)}</td>
       <td class="num">${nf(u.tools)}</td>
@@ -361,6 +474,7 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
       <td class="num">${u.tools ? ((u.errors / u.tools) * 100).toFixed(1) + ' %' : '—'}</td>
       <td class="num">${nf(u.tokens)}</td>
       <td class="tag">${esc([...u.surfaces].sort().join(', ') || '—')}</td>
+      <td class="tag">${capteurCell(capteurs, u.user)}</td>
       <td class="tag">${esc([...u.projects].slice(0, 3).join(', '))}</td></tr>`).join('')}
   </table></div>
 </section>

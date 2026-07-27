@@ -68,7 +68,10 @@ for (const s of sessions.values()) {
     // Champs que seul le poste connait : on les reprend de la fiche existante plutot que de les inventer.
     let old = {};
     try { old = JSON.parse(gs('cat', `gs://${bucket}/cards/${user}/${s.date}_${s.sid}.json`)); } catch { /* pas de fiche */ }
-    for (const k of ['user', 'host', 'platform', 'project', 'client_version', 'scoped', 'recovered']) {
+    // `plugin_version` en fait partie et c'est important : cette passe reecrit `schema` avec la lib
+    // de la machine qui rejoue, donc le schema ne dit RIEN de la version installee chez le poste.
+    // Ecraser le stamp du poste rendrait un capteur gele indetectable, ce qu'il a deja ete 5 jours.
+    for (const k of ['user', 'host', 'platform', 'project', 'client_version', 'plugin_version', 'scoped', 'recovered']) {
       if (old[k] !== undefined) card[k] = old[k];
     }
     // Le VERDICT de friction se reprend aussi. Il est produit ailleurs (juge haiku, machine d'audit)

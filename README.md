@@ -21,13 +21,37 @@ Le client **lit** ce que Claude Code a déjà écrit sur le disque, calcule la f
 /plugin install latrace-telemetry@latrace
 ```
 
-Puis, dans un terminal, l'adresse et la clé du service (elles ne sont pas dans ce dépôt, qui est public) :
+Puis, dans un terminal, l'adresse et la clé du service (elles ne sont pas dans ce dépôt, qui est
+public), et l'activation des mises à jour automatiques :
 
 ```bash
 mkdir -p ~/.latrace-telemetry && printf '%s\n' '{"endpoint":"<url>","token":"<jeton>","user":"<prenom>"}' > ~/.latrace-telemetry/config.json
+node "$HOME/.claude/plugins/marketplaces/latrace/tools/enable-autoupdate.mjs"
 ```
 
-Une fois, puis plus rien : le plugin se met à jour tout seul depuis ce dépôt, à chaque commit.
+La deuxième ligne n'est pas optionnelle : **Claude Code ne met à jour tout seul que les marketplaces
+d'Anthropic**. Pour tous les autres, `autoUpdate` vaut `false` par défaut et le plugin reste épinglé
+au commit du jour de l'installation, indéfiniment et sans le dire. Le script déclare le marketplace
+`latrace` comme auto-updatable dans `~/.claude/settings.json` ; après ça, plus rien à faire.
+
+## Resynchroniser un poste gelé
+
+Symptôme : le cockpit affiche « capteur en retard » sur un poste, ou ses fiches arrivent sans les
+champs récents. Trois commandes, une seule fois, dans un terminal :
+
+```bash
+claude plugin marketplace update latrace
+node "$HOME/.claude/plugins/marketplaces/latrace/tools/enable-autoupdate.mjs"
+claude plugin update latrace-telemetry@latrace
+```
+
+Puis redémarrer Claude Code (la mise à jour d'un plugin ne s'applique qu'au démarrage suivant). La
+première ligne rafraîchit le clone du marketplace, la deuxième fait qu'on n'aura plus jamais à le
+faire, la troisième déplace le plugin installé sur le dernier commit. Aucune des trois ne touche aux
+sessions ni aux données.
+
+Rien ne se perd pendant le gel : les transcripts restent sur le poste et dans le bucket, les fiches
+peuvent être recalculées après coup (`tools/recompute-from-bucket.mjs`).
 
 Prérequis : `node` dans le PATH. Aucun compte GitHub requis (dépôt public, clone HTTPS anonyme,
 vérifié sur une machine sans clé SSH ni credentials).
@@ -139,3 +163,11 @@ Lucas, on ne peut pas rejouer l'historique d'un poste à distance.
   les champs de traçage brain restent nuls, le reste de la fiche est identique et comparable.
 - `user` vaut le nom d'utilisateur système du poste. Pour forcer un nom lisible :
   `{"user": "quentin"}` dans `~/.latrace-telemetry/config.json`.
+- **Ne pas mettre de `version` dans `.claude-plugin/plugin.json`** : une version figée bloque les
+  mises à jour. Mais l'enlever ne suffit pas à en déclencher : la mise à jour d'un marketplace tiers
+  dépend uniquement d'`autoUpdate` (voir Installation). L'absence de `version` et la présence
+  d'`autoUpdate` sont deux conditions nécessaires, aucune n'est suffisante seule.
+- Chaque fiche porte `plugin_version` : le sha du commit installé sur le poste qui l'a émise. C'est
+  le seul champ qui dise la version réellement en service. Ne pas se fier au `schema` de la fiche
+  pour ça, `recompute-from-bucket` le réécrit avec la lib de la machine qui rejoue. Le cockpit
+  compare ce sha à celui du poste qui a émis la fiche la plus récente, et alerte sur les autres.

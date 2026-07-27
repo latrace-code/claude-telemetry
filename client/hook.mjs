@@ -34,6 +34,14 @@ function projectLabel(cwd) {
   return b;
 }
 
+// Claude Code installe un plugin dans .../cache/<marketplace>/<plugin>/<sha12>/ et expose ce chemin
+// dans CLAUDE_PLUGIN_ROOT. Le dernier segment est donc le commit installe. Hors plugin (capteur
+// lance a la main), on ne stampe rien plutot que d'inventer une version.
+function pluginVersion() {
+  const seg = basename((process.env.CLAUDE_PLUGIN_ROOT || HERE).replace(/[\\/]+$/, ''));
+  return /^[0-9a-f]{7,40}$/i.test(seg) ? seg : null;
+}
+
 // L'uploader tourne seul, sans terminal rattache. windowsHide evite la fenetre console qui clignote
 // a chaque fin de session sur le poste Windows : c'est la difference entre un capteur invisible et
 // un truc qu'on finit par desinstaller.
@@ -82,6 +90,13 @@ function main() {
   card.host = hostname();
   card.platform = process.platform;
   card.client_version = cfg.version || null;
+  // Quel commit du capteur tourne VRAIMENT sur ce poste. Claude Code n'auto-update pas un
+  // marketplace tiers (autoUpdate defaut a false hors marketplaces Anthropic) : un poste peut rester
+  // gele des semaines sur une vieille version et rien ne le distingue d'un poste a jour, ses fiches
+  // arrivant simplement sans les champs recents. Le repertoire d'install porte le sha du commit,
+  // c'est la seule mesure que le poste est seul a connaitre. Ne pas se fier au `schema` de la fiche :
+  // recompute-from-bucket la reecrit avec la lib de la machine qui rejoue.
+  card.plugin_version = pluginVersion();
   // Un poste qui restreint son perimetre (include_projects) ne montre qu'une partie de son travail.
   // Sans ce temoin, il serait indistinguable d'un poste peu actif : la mesure deviendrait
   // declarative sans que personne ne le voie. Le detail des chemins ne remonte pas, seul le fait.
