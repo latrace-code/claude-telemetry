@@ -32,10 +32,27 @@ function unionMinutes(intervals) {
   return (total + (ce - cs)) / 60000;
 }
 
+// Groupage des outils : combien de blocs tool_use l'IA place dans un MEME appel API. A ne pas
+// confondre avec la densite ci-dessus, qui compte des SESSIONS en parallele. Ici on compte des
+// outils dans un message. `batch_sessions` = fiches qui portent la mesure : les fiches emises avant
+// l'ajout du champ ne l'ont pas, et un ratio calcule sur une partie du corpus doit se dire.
+const ZERO_BATCH = { calls: 0, tools: 0, single: 0, sessions: 0 };
+function addBatch(acc, card) {
+  const tb = card.tool_batch_all || card.tool_batch;
+  if (!tb || !tb.calls) return;
+  acc.calls += tb.calls;
+  acc.tools += tb.tools || 0;
+  acc.single += tb.single_tool_calls || 0;
+  acc.sessions++;
+}
+function perCall(b) { return b.calls ? b.tools / b.calls : 0; }
+function perCallLabel(b) { return b.calls ? perCall(b).toFixed(2).replace('.', ',') : '—'; }
+function monoPct(b) { return b.calls ? (100 * b.single) / b.calls : 0; }
+
 function aggregate(cards) {
   const byUser = new Map();
   const byDay = new Map();
-  const totals = { sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0 };
+  const totals = { sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, batch: { ...ZERO_BATCH } };
   const allIv = [];
 
   for (const c of cards) {
@@ -55,8 +72,10 @@ function aggregate(cards) {
     const startMs = c.ts_start ? Date.parse(c.ts_start) : null;
     const iv = (startMs !== null && work > 0) ? [startMs, startMs + work * 60000] : null;
 
-    if (!byUser.has(u)) byUser.set(u, { user: u, sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, projects: new Set(), surfaces: new Set(), scoped: false, iv: [] });
+    if (!byUser.has(u)) byUser.set(u, { user: u, sessions: 0, active: 0, wait: 0, dormant: 0, wall: 0, prompts: 0, frictions: 0, tools: 0, errors: 0, tokens: 0, agents: 0, batch: { ...ZERO_BATCH }, projects: new Set(), surfaces: new Set(), scoped: false, iv: [] });
     const U = byUser.get(u);
+    addBatch(U.batch, c);
+    addBatch(totals.batch, c);
     U.sessions++; U.active += active; U.wait += wait; U.dormant += dormant; U.wall += wall;
     U.prompts += c.user_prompts || 0; U.frictions += fr;
     U.tools += c.tools_total_all ?? c.tools_total ?? 0;
@@ -303,9 +322,11 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
     ${tile('Relances humaines', nf(totals.prompts), totals.sessions ? `${(totals.prompts / totals.sessions).toFixed(1)} par session` : '')}
     ${tile('Frictions', nf(totals.frictions), 'prompts marques')}
     ${tile('Appels d\'outils', nf(totals.tools), `${errRate.toFixed(1)} % d'erreurs`)}
+    ${tile('Outils par appel', perCallLabel(totals.batch), totals.batch.calls ? `${monoPct(totals.batch).toFixed(0)} % n'en portent qu'un` : 'pas encore mesure')}
     ${tile('Tokens produits', nf(totals.tokens), `${nf(totals.agents)} agents`)}
   </div>
   <p class="note"><b>Temps actif</b> = le temps ou une machine que vous avez lancee produit vraiment (l'IA enchaine, vous ecrivez), les silences de plus de 5 min exclus. Il mesure l'<b>intensite de collaboration</b>, pas les heures de presence. Deux sessions actives a la meme minute comptent double : travailler sur plusieurs sujets en parallele compte plein. Un poste au temps actif faible n'a pas moins travaille : il sollicite l'IA par a-coups (voir la part d'attente ci-dessous).</p>
+  <p class="note"><b>Outils par appel</b> = combien d'actions l'IA groupe dans un seul message, au lieu de les demander l'une apres l'autre. Lire trois fichiers d'un coup coute une attente ; les lire en trois messages en coute trois. Un aller-retour de plus prend environ 9,5 s, un outil de plus dans le meme message environ 0,8 s. Plus le chiffre monte, moins on attend pour le meme travail. Rien a voir avec la densite ci-dessous, qui compte des sessions en parallele.${totals.batch.sessions && totals.batch.sessions < totals.sessions ? ` Mesure sur ${nf(totals.batch.sessions)} des ${nf(totals.sessions)} sessions : les fiches emises avant l'ajout de la mesure ne la portent pas.` : ''}</p>
   ${folded ? `<p class="note">${nf(folded)} session(s) repliee(s) : ce sont des reprises d'une meme conversation, dont le transcript rejoue l'historique. Sans ce repli, le meme travail serait compte plusieurs fois.</p>` : ''}
   ${botTotals.sessions ? `<p class="note">${nf(botTotals.sessions)} sessions automatiques (boucles d'amelioration, juge, digest) exclues de ces chiffres. Leur cout : ${nf(botTotals.tokens)} tokens, ${hoursLabel(botTotals.active)}. <a href="${q(selected)}${bots ? '' : '&bots=1'}" class="ulink">${bots ? 'les masquer' : 'les afficher'}</a>.</p>` : ''}
 </section>
@@ -326,7 +347,7 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   <h2>Par poste</h2>
   <div class="scroll"><table>
     <tr><th>Poste</th><th class="num">Sessions</th><th class="num">Temps actif</th><th class="num">Attente</th><th class="num" title="temps actif / temps reel : > 1 = sessions en parallele">Densite</th><th class="num">Relances</th>
-      <th class="num">Frictions</th><th class="num">Outils</th><th class="num">Erreurs</th><th class="num">Tokens</th><th>Surface</th><th>Projets</th></tr>
+      <th class="num">Frictions</th><th class="num">Outils</th><th class="num" title="outils groupes dans un meme appel API : plus c'est haut, moins on paie d'allers-retours">Outils/appel</th><th class="num">Erreurs</th><th class="num">Tokens</th><th>Surface</th><th>Projets</th></tr>
     ${users.map(u => `<tr>
       <td><span class="who"><i style="background:var(--s${colorOf.get(u.user) ?? 0})"></i><a class="ulink" href="?days=${windowDays}&user=${encodeURIComponent(u.user)}">${esc(u.user)}</a></span>${u.scoped ? '<span class="scoped" title="Ce poste ne remonte qu\'une partie de ses sessions (perimetre restreint)">perimetre restreint</span>' : ''}</td>
       <td class="num">${nf(u.sessions)}</td>
@@ -336,6 +357,7 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
       <td class="num">${nf(u.prompts)}</td>
       <td class="num${u.frictions ? ' alert' : ''}">${nf(u.frictions)}</td>
       <td class="num">${nf(u.tools)}</td>
+      <td class="num"${u.batch.calls ? ` title="${monoPct(u.batch).toFixed(0)} % des appels ne portent qu'un seul outil, sur ${nf(u.batch.sessions)} session(s) mesuree(s)"` : ''}>${perCallLabel(u.batch)}</td>
       <td class="num">${u.tools ? ((u.errors / u.tools) * 100).toFixed(1) + ' %' : '—'}</td>
       <td class="num">${nf(u.tokens)}</td>
       <td class="tag">${esc([...u.surfaces].sort().join(', ') || '—')}</td>

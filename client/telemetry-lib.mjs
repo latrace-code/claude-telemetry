@@ -10,6 +10,12 @@
 // voyait que le transcript de la session mère : la nuit Fooding iOS du 20/07 déclarait 4 agents et
 // 1,49 M de tokens alors que le réel était 88 transcripts d'agents et 3,59 M. Tout audit d'un
 // chantier orchestré était donc faux d'un facteur ~2,4, dans le sens qui flatte. Voir scanSidechains.
+//
+// schema 5 : GROUPAGE DES OUTILS (`tool_batch`) - combien de blocs tool_use l'assistant place dans un
+// même appel API. Mesuré une fois en juillet par un script hors ligne (scripts/session-audit/
+// parallelism.mjs) puis jamais suivi : 83 % des appels ne portaient qu'un outil. C'est le seul levier
+// de vitesse mesurable, un aller-retour coûtant ~9,5 s contre ~0,8 s pour un outil de plus dans le
+// même message. À ne pas confondre avec la "densité" du cockpit, qui compte des SESSIONS en parallèle.
 
 // Marqueurs de friction dans les prompts humains. Proxy assumé : capte ce que Lucas VERBALISE,
 // pas les régressions silencieuses. La passe LLM affine ces compteurs bruts.
@@ -196,6 +202,49 @@ function mergeBrain(a, b) {
   };
 }
 
+// --- Groupage des outils ----------------------------------------------------
+// Question : quand l'assistant appelle des outils, combien en groupe-t-il dans le MÊME appel API ?
+// Un appel de plus coûte un aller-retour complet (~9,5 s de médiane mesurée sur 1 062 sessions),
+// un outil de plus dans un appel déjà émis coûte ~0,8 s.
+//
+// PIÈGE DU FORMAT, à ne jamais contourner : les blocs d'un même message API sont éclatés sur
+// PLUSIEURS lignes JSONL qui partagent le même `message.id`, chacune avec son propre timestamp de
+// streaming. Compter par ligne rendrait 99,9 % d'appels mono-outil, ce qui est faux. On regroupe donc
+// par `message.id`, exactement comme parallelism.mjs, sinon les chiffres cessent d'être comparables
+// à la baseline de juillet.
+const WRITE_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit']);
+
+// perMessage : Map(clé de message -> { n: blocs tool_use, w: dont écritures }).
+// null quand la session n'a émis aucun outil : rien à afficher vaut mieux qu'un zéro trompeur.
+function summarizeToolBatch(perMessage) {
+  let calls = 0, tools = 0, singleTool = 0, writeCalls = 0, writes = 0, singleWrite = 0;
+  for (const b of perMessage.values()) {
+    if (!b.n) continue;
+    calls++; tools += b.n;
+    if (b.n === 1) singleTool++;
+    if (b.w) { writeCalls++; writes += b.w; if (b.w === 1) singleWrite++; }
+  }
+  if (!calls) return null;
+  return {
+    calls,                            // appels API portant au moins un outil
+    tools,                            // blocs tool_use dans ces appels
+    single_tool_calls: singleTool,    // appels n'en portant qu'un seul
+    write_calls: writeCalls,          // appels portant au moins une écriture (Edit/Write/NotebookEdit)
+    writes,
+    single_write_calls: singleWrite,
+  };
+}
+
+function mergeToolBatch(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  const s = k => (a[k] || 0) + (b[k] || 0);
+  return {
+    calls: s('calls'), tools: s('tools'), single_tool_calls: s('single_tool_calls'),
+    write_calls: s('write_calls'), writes: s('writes'), single_write_calls: s('single_write_calls'),
+  };
+}
+
 // events: tableau d'objets JSONL déjà parsés. Retourne la fiche de télémétrie (objet sérialisable).
 //
 // `detector` : fonction (texte) -> { friction, regression, correction, validation }.
@@ -230,6 +279,8 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
   let openFriction = null;
 
   const brainAcc = newBrainAcc();
+  const toolsPerMsg = new Map();
+  let anonMsgSeq = 0;
   // Session courante : sert a ecarter les messages rejoues d'une conversation dont celle-ci est issue.
   const ownSid = meta.sid || null;
   let inheritedEvents = 0;
@@ -292,11 +343,17 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
         cacheR += u.cache_read_input_tokens || 0;
       }
       if (Array.isArray(m.content)) {
+        // Même clé que parallelism.mjs : l'id du message API, l'uuid de la ligne en dernier recours.
+        const batchKey = mid || (typeof e.uuid === 'string' ? e.uuid : `#${++anonMsgSeq}`);
         for (const b of m.content) {
           if (b && b.type === 'tool_use') {
             tools[b.name] = (tools[b.name] || 0) + 1;
             if (b.name === 'Task' || b.name === 'Agent') subagents++;
             collectBrainAccess(b.name, b.input, brainAcc);
+            const batch = toolsPerMsg.get(batchKey) || { n: 0, w: 0 };
+            batch.n++;
+            if (WRITE_TOOLS.has(b.name)) batch.w++;
+            toolsPerMsg.set(batchKey, batch);
           }
         }
       }
@@ -380,6 +437,10 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     // ce qui est en soi le résultat intéressant.
     brain: finishBrain(brainAcc),
     brain_all: mergeBrain(finishBrain(brainAcc), (meta.sidechains && meta.sidechains.brain) || null),
+    // Groupage des outils par appel API. `tool_batch` = session mère seule, `tool_batch_all` = mère +
+    // agents, même convention que tools_total / tools_total_all. null = la session n'a émis aucun outil.
+    tool_batch: summarizeToolBatch(toolsPerMsg),
+    tool_batch_all: mergeToolBatch(summarizeToolBatch(toolsPerMsg), (meta.sidechains && meta.sidechains.tool_batch) || null),
     agents_total: meta.sidechains ? Math.max(subagents, meta.sidechains.agents) : subagents,
     tokens_out_all: outTok + ((meta.sidechains && meta.sidechains.tokens_out) || 0),
     tools_total_all: toolsTotal + ((meta.sidechains && meta.sidechains.tools_total) || 0),
@@ -397,7 +458,7 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     // qui lit signals.friction sans regarder `judged` lira null et doit le traiter comme "inconnu",
     // jamais comme zéro.
     judged: !!detector,
-    schema: 4,
+    schema: 5,
   };
 }
 
@@ -468,6 +529,8 @@ export function scanSidechains(fs, sessionDir, opts = {}) {
   let turns = 0, tokensOut = 0, toolsTotal = 0, toolErrors = 0, scanned = 0;
   const seenAgentTurns = new Set(); // meme dedup que la mere : usage compte une fois par message.id
   const brainAcc = newBrainAcc();
+  const toolsPerMsg = new Map();
+  let anonMsgSeq = 0;
   for (const path of files) {
     if (Date.now() - t0 > budgetMs) break;
     let raw;
@@ -486,9 +549,16 @@ export function scanSidechains(fs, sessionDir, opts = {}) {
           turns++;
           tokensOut += (m.usage && m.usage.output_tokens) || 0;
         }
-        if (Array.isArray(m.content)) for (const b of m.content) if (b && b.type === 'tool_use') {
-          toolsTotal++;
-          collectBrainAccess(b.name, b.input, brainAcc);
+        if (Array.isArray(m.content)) {
+          const batchKey = mid || (typeof e.uuid === 'string' ? e.uuid : `#${++anonMsgSeq}`);
+          for (const b of m.content) if (b && b.type === 'tool_use') {
+            toolsTotal++;
+            collectBrainAccess(b.name, b.input, brainAcc);
+            const batch = toolsPerMsg.get(batchKey) || { n: 0, w: 0 };
+            batch.n++;
+            if (WRITE_TOOLS.has(b.name)) batch.w++;
+            toolsPerMsg.set(batchKey, batch);
+          }
         }
       } else if (m.role === 'user' && Array.isArray(m.content)) {
         for (const b of m.content) if (b && b.type === 'tool_result' && b.is_error) toolErrors++;
@@ -507,6 +577,9 @@ export function scanSidechains(fs, sessionDir, opts = {}) {
     tokens_out: tokensOut,
     tools_total: toolsTotal,
     tool_errors: toolErrors,
+    // Groupage des outils des agents seuls : ils enchaînent souvent plus serré que la mère, et les
+    // exclure ferait mentir le chiffre des sessions orchestrées.
+    tool_batch: summarizeToolBatch(toolsPerMsg),
     // Ce que les agents sont allés lire dans le brain, seuls. Souvent différent de la mère : sur la
     // session LCRCA du 21/07, six notes memory n'ont été ouvertes que par eux.
     brain: finishBrain(brainAcc),
