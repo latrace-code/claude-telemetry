@@ -79,6 +79,31 @@ function safeRelPath(name) {
 
 function safeId(v) { return typeof v === 'string' && SAFE_SEGMENT.test(v) && v.length <= 100 ? v : null; }
 
+// Une fiche est REEMISE a chaque reprise de conversation, et en masse par un recompute. Le verdict
+// du juge, lui, ne vit QUE dans le bucket : le poste ne l'a jamais eu, il repose donc une fiche
+// sans jugement. Sans ce report, chaque reemission effacait le verdict deja pose -- 84 verdicts et
+// 190 frictions perdus en une seule passe le 27/07, reposes a la main.
+// Regle : la fiche entrante gagne sur TOUT, sauf sur les champs que seul le juge produit, et
+// seulement si elle n'apporte pas de jugement elle-meme (cas du poste de Lucas, ou le juge tourne
+// en local et ecrit dans la fiche avant l'envoi).
+async function carryOverVerdict(file, card) {
+  if (card.judged) return;
+  let prev;
+  try { prev = JSON.parse((await file.download())[0].toString('utf8')); }
+  catch { return; } // premiere ecriture de cette fiche : rien a reporter
+  if (!prev || !prev.judged) return;
+  const ps = prev.signals || {};
+  card.signals = {
+    ...(card.signals || {}),
+    friction: ps.friction ?? null,
+    correction: ps.correction ?? null,
+    regression: ps.regression ?? null,
+  };
+  card.friction_prompts = Array.isArray(prev.friction_prompts) ? prev.friction_prompts : [];
+  card.judged = true;
+  card.judged_at = prev.judged_at || null;
+}
+
 async function handleSession(req, res) {
   const body = await readBody(req);
   const card = body && body.card;
@@ -90,7 +115,9 @@ async function handleSession(req, res) {
   if (!sid) return fail(res, 400, 'invalid sid');
 
   card.received_at = new Date().toISOString();
-  await storage.bucket(BUCKET).file(`cards/${user}/${date}_${sid}.json`).save(JSON.stringify(card, null, 1), {
+  const file = storage.bucket(BUCKET).file(`cards/${user}/${date}_${sid}.json`);
+  await carryOverVerdict(file, card);
+  await file.save(JSON.stringify(card, null, 1), {
     contentType: 'application/json',
     resumable: false,
   });
