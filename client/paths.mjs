@@ -23,16 +23,29 @@ export function loadConfig() {
   return { ...read(join(HERE, 'config.json')), ...read(join(STATE_DIR, 'config.json')) };
 }
 
-// --- Perimetre (allowlist opt-in) ------------------------------------------
-// Par defaut le capteur remonte TOUTES les sessions. Un poste qui melange travail d'equipe et
-// projets perso sur la meme machine peut restreindre l'envoi a une liste de dossiers via
-// `include_projects` dans ~/.latrace-telemetry/config.json :
+// --- Perimetre (allowlist explicite, obligatoire) ---------------------------
+// Le capteur ne remonte QUE les dossiers explicitement listes dans `include_projects`
+// (~/.latrace-telemetry/config.json) :
 //
 //   "include_projects": ["/Users/moi/Developer/LaTrace"]
 //
 // Liste de prefixes de CHEMINS REELS. Une session n'est retenue que si son cwd est ce dossier ou un
-// sous-dossier. Liste absente ou vide => comportement historique : tout remonte, aucun poste qui ne
-// configure rien n'est impacte.
+// sous-dossier (worktrees inclus).
+//
+// Liste absente ou vide => RIEN ne remonte. C'est l'inversion du defaut : jusqu'ici une liste
+// absente valait "tout le poste", si bien qu'une machine qui melange travail d'equipe et depots
+// persos les remontait tous sans que personne n'ait eu a le decider. Un defaut qui capte s'installe
+// par oubli, un defaut qui se tait s'installe par decision. Le pire cas change donc de camp : avant,
+// un oubli exposait un depot perso et personne ne pouvait s'en apercevoir ; maintenant un oubli fait
+// taire un poste, ce qui se voit dans le cockpit et se repare en une ligne de config.
+//
+// Un poste qui veut effectivement tout remonter le peut toujours, mais il doit le DIRE :
+//
+//   "include_projects": ["*"]
+//
+// Le joker n'est reconnu que sous cette forme exacte, comme entree du tableau. Une chaine nue
+// ("include_projects": "*") ou toute autre valeur non-tableau vaut liste vide, donc silence : sur un
+// interrupteur qui ouvre tout le poste, une faute de frappe doit tomber du cote qui protege.
 
 // Encodage Claude Code d'un chemin en nom de dossier ~/.claude/projects/<...> : chaque caractere non
 // alphanumerique devient '-'. Verifie sur poste : /Users/bob/Developer/LaTrace ->
@@ -64,11 +77,20 @@ function normalizeForCompare(p) {
   return CASE_INSENSITIVE_FS ? s.toLowerCase() : s;
 }
 
-export function projectAllowed(subject, cfg) {
-  const inc = cfg && Array.isArray(cfg.include_projects)
-    ? cfg.include_projects.filter(s => typeof s === 'string' && s.trim())
+// Opt-in explicite "tout ce poste". Voir le bloc ci-dessus : reconnu uniquement comme entree du
+// tableau, jamais comme valeur nue.
+const ALL_PROJECTS = '*';
+
+function includeList(cfg) {
+  return cfg && Array.isArray(cfg.include_projects)
+    ? cfg.include_projects.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim())
     : [];
-  if (!inc.length) return true;                       // pas d'allowlist -> on ne filtre rien
+}
+
+export function projectAllowed(subject, cfg) {
+  const inc = includeList(cfg);
+  if (inc.includes(ALL_PROJECTS)) return true;        // le poste a demande a tout remonter
+  if (!inc.length) return false;                      // rien de configure -> rien ne part
   if (typeof subject !== 'string' || !subject) return false;
   const s = normalizeForCompare(subject);
   return inc.some(pref => {
@@ -78,8 +100,9 @@ export function projectAllowed(subject, cfg) {
 }
 
 // Le poste restreint-il son perimetre ? Sert uniquement a marquer la fiche : un poste filtre doit
-// etre lisible comme tel, pas confondu avec un poste inactif.
+// etre lisible comme tel, pas confondu avec un poste inactif. Un poste en "*" ne restreint rien,
+// il n'est donc pas marque.
 export function scopeActive(cfg) {
-  return !!(cfg && Array.isArray(cfg.include_projects)
-    && cfg.include_projects.some(s => typeof s === 'string' && s.trim()));
+  const inc = includeList(cfg);
+  return inc.length > 0 && !inc.includes(ALL_PROJECTS);
 }
