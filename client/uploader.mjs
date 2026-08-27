@@ -15,6 +15,7 @@ import { createGzip } from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import { analyzeTranscript, readEvents, scanSidechains } from './telemetry-lib.mjs';
 import { STATE_DIR, QUEUE_DIR, SENT_FILE, LOCK_FILE, PROJECTS_DIR, loadConfig, projectAllowed, scopeActive } from './paths.mjs';
+import { localDetector, redactCard, shareTranscripts } from './privacy.mjs';
 
 const LOCK_TTL_MS = 15 * 60 * 1000;
 const RESCAN_WINDOW_MS = 7 * 24 * 3600 * 1000;
@@ -103,6 +104,10 @@ async function putSigned(url, filePath) {
 async function sendOne(item) {
   const { card } = item;
   await post('/v1/sessions', { card });
+
+  // La fiche part toujours ; le transcript seulement si le poste l'a demande. C'est tout ce que ce
+  // reglage change cote reseau : la fiche est deja partie a la ligne du dessus, complete.
+  if (!shareTranscripts(cfg)) return;
 
   const files = sessionFiles(item.transcript_path, item.session_dir);
   if (!files.length) return;
@@ -204,7 +209,7 @@ function rescan() {
         sid: c.sid,
         project: c.proj.replace(/^-/, '').split('-').pop() || c.proj,
         sidechains: scanSidechains(fs, sessionDir),
-      });
+      }, localDetector(cfg));
       if (!card.subject || (card.user_prompts < 1 && !card.automated)) { markSent(c.sid); continue; }
       card.user = cfg.user || userInfo().username;
       card.host = hostname();
@@ -212,6 +217,8 @@ function rescan() {
       card.client_version = cfg.version || null;
       card.scoped = scopeActive(cfg);
       card.recovered = true;
+      if (card.judged) card.judged_by = 'regex-local';
+      redactCard(card, cfg);
       mkdirSync(QUEUE_DIR, { recursive: true });
       writeFileSync(join(QUEUE_DIR, `${c.sid}.json`), JSON.stringify({
         card, transcript_path: c.abs, session_dir: sessionDir,

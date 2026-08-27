@@ -152,15 +152,22 @@ async function handleVerdict(req, res) {
     correction: n(v.correction),
     regression: n(v.regression),
   };
+  // Le juge lit le TRANSCRIPT : il voit donc le texte des prompts meme quand le poste a demande a ne
+  // pas le stocker en fiche. Sans ce garde-fou le verdict le reinjecterait dans la fiche, c'est-a-dire
+  // dans l'objet a retention illimitee : le reglage du poste serait contourne par le chemin le plus
+  // durable du systeme. Une fiche sans `shares` vient d'un client anterieur au reglage, donc aucun
+  // opt-in n'a ete exprime : on ne stocke pas le texte.
+  const keepText = !!(card.shares && card.shares.prompt_text);
   card.friction_prompts = Array.isArray(v.friction_prompts)
     ? v.friction_prompts.slice(0, 100).map(f => ({
-        text: String(f && f.text || '').slice(0, 240),
+        ...(keepText ? { text: String(f && f.text || '').slice(0, 240) } : {}),
         turns: n(f && f.turns),
         min: n(f && f.min),
         famille: typeof (f && f.famille) === 'string' ? f.famille.slice(0, 40) : null,
       }))
     : [];
   card.judged = true;
+  card.judged_by = 'llm';
   card.judged_at = new Date().toISOString();
 
   await file.save(JSON.stringify(card, null, 1), { contentType: 'application/json', resumable: false });

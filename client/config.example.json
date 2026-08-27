@@ -2,5 +2,7 @@
   "endpoint": "https://<service>/",
   "token": "<jeton d'ingestion>",
   "version": "1.0.0",
-  "include_projects": []
+  "include_projects": [],
+  "transcripts": false,
+  "prompt_text": false
 }

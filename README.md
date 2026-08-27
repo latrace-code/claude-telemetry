@@ -14,6 +14,39 @@ Le client **lit** ce que Claude Code a déjà écrit sur le disque, calcule la f
 - Il ne bloque jamais une session : le hook calcule la fiche puis rend la main, l'envoi part dans un
   process détaché.
 
+## Ce qui sort du poste
+
+Trois choses de nature très différente, qui se règlent séparément dans
+`~/.latrace-telemetry/config.json` :
+
+| | Contenu | Réglage | Rétention |
+|---|---|---|---|
+| **Fiche** | compteurs : durées, relances, tours, outils, erreurs, tokens, agents, projet, branche, surface | toujours envoyée | illimitée |
+| **Transcript** | la conversation entière + celle de chaque sous-agent, contenu des fichiers lus et sortie des commandes | `"transcripts": true` | 90 jours |
+| **Extraits verbatim en fiche** | `subject` (90 car du 1er prompt), texte des frictions (40 × 240 car), requêtes de recherche mémoire | `"prompt_text": true` | illimitée |
+
+Les deux réglages valent `false` tant qu'on ne les a pas mis à `true` explicitement. La comparaison
+est stricte : la chaîne `"true"`, ou toute faute de frappe, vaut `false`. Sur un interrupteur qui
+fait sortir du verbatim, l'erreur doit tomber du côté qui protège.
+
+**Ce qui part toujours, quoi qu'on règle** : tous les compteurs. Durées actif/attente/dormant,
+relances humaines, tours d'assistant, appels d'outils et taux d'erreur, tokens, agents, workflows,
+projet, branche, surface, plateforme, hôte. C'est-à-dire tout ce que le cockpit affiche, à
+l'exception de la colonne Sujet et du texte des frictions.
+
+**Le signal de friction survit sans le verbatim.** Le juge (haiku) tourne sur la machine d'audit, à
+partir du transcript stocké : un poste qui ne partage pas son transcript le priverait de matière et
+`signals.friction` resterait `null` pour toujours. Le capteur calcule donc le signal *sur le poste*,
+avec le détecteur regex déterministe déjà présent dans la lib (celui que mesure `judge-bench`), et
+n'envoie que le résultat : le nombre de frictions et leur **coût** — tours et minutes imputés
+jusqu'au prompt humain suivant. La phrase qui les a déclenchées reste sur la machine. `judged_by`
+distingue `regex-local` d'un verdict `llm`.
+
+Pourquoi le défaut est `false` des deux côtés : les extraits verbatim de la fiche ont la rétention
+des **fiches**, illimitée, là où les transcripts purgent à 90 jours. Le verbatim le plus durable du
+système est donc celui qu'on remarque le moins — il n'apparaît nulle part dans l'écran qu'on
+regarde. Un réglage qui fait sortir du verbatim se donne ; il ne s'hérite pas.
+
 ## Installation (poste Mac ou Windows)
 
 ```
@@ -108,7 +141,7 @@ Le poste n'a aucun credential Google : il demande au service une URL signée à 
 |---|---|
 | Service d'ingestion | Cloud Run `latrace-telemetry-ingest`, europe-west1, projet `latrace31` |
 | Stockage | `gs://latrace-claude-telemetry` (privé, public access prevention, IAM uniforme) |
-| Rétention | fiches : illimitée (1 Ko chacune) · transcripts : purge automatique à 90 jours |
+| Rétention | fiches : illimitée (1 Ko chacune) · transcripts : purge automatique à 90 jours, et envoyés seulement si `"transcripts": true` |
 
 Le service est **en écriture seule** : aucune route ne rend de donnée. Les transcripts contiennent le
 contenu des fichiers lus et la sortie des commandes exécutées, donc potentiellement des credentials.
@@ -128,6 +161,12 @@ poste connaît (surface, hôte, version du client, sidechains) : il n'envoie don
 le serveur le pose sur la fiche stockée. Sans cette route, `signals.friction` restait `null` dans le
 bucket pour toujours et la tuile Frictions du cockpit ne montrait que l'historique backfillé.
 La réponse ne renvoie que ce que l'appelant vient d'écrire : la règle d'écriture seule tient.
+
+Le juge lit le transcript, donc il *voit* le texte des prompts même quand le poste a demandé à ne pas
+le stocker en fiche. Le serveur ne pose donc le texte des frictions que si la fiche stockée porte
+`shares.prompt_text: true` — sans quoi le réglage du poste serait contourné par le chemin le plus
+durable du système. Une fiche sans `shares` vient d'un client antérieur au réglage : aucun opt-in n'a
+été exprimé, le texte n'est pas stocké.
 
 ## Auditer
 
