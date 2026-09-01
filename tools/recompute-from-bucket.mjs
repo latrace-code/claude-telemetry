@@ -100,7 +100,10 @@ for (const s of sessions.values()) {
     // en silence tout le travail du juge. Vu deux fois en une heure le 22/07, les deux passes tournant
     // le meme jour sur les memes fiches. Le juge repassera de toute facon et rafraichira le verdict si
     // les prompts ont bouge ; entre-temps, mieux vaut l'ancien verdict que pas de verdict du tout.
-    if (old.judged) {
+    // Sauf un verdict de regex locale : cette passe ne rejoue QUE des sessions dont le transcript est
+    // stocke, donc le juge a de la matiere et fera mieux. Le reprendre figerait le repli sur la seule
+    // population ou le meilleur verdict est a portee de main.
+    if (old.judged && old.judged_by !== 'regex-local') {
       card.signals = { ...card.signals, ...pick(old.signals, ['friction', 'correction', 'regression']) };
       card.friction_prompts = old.friction_prompts || [];
       card.judged = true;

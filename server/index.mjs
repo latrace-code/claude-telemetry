@@ -99,6 +99,18 @@ async function carryOverVerdict(file, card) {
   try { prev = JSON.parse((await file.download())[0].toString('utf8')); }
   catch { return; } // premiere ecriture de cette fiche : rien a reporter
   if (!prev || !prev.judged) return;
+
+  // Un verdict de regex locale ne vaut que tant qu'AUCUN transcript n'est a portee du juge : c'est le
+  // repli d'un poste qui ne partage pas sa matiere, pas un resultat qui se defend contre haiku. Deux
+  // cas ou la matiere est la : la fiche entrante partage son transcript (il monte dans la foulee,
+  // sendOne enchaine sur /v1/sessions), ou elle vient d'un rejeu, qui ne rejoue QUE des sessions dont
+  // le transcript est deja stocke. Le reporter dans ces cas-la annulerait le retrait que le poste
+  // vient de faire au drain, et le transcript televerse ne serait jamais relu : la passe haiku filtre
+  // sur `judged`. C'est le meme aller-retour que cote client, une couche plus bas.
+  // Une provenance inconnue, elle, est un verdict d'ailleurs : il se reporte.
+  const hasMaterial = (card.shares && card.shares.transcripts === true) || card.recomputed === true;
+  if (prev.judged_by === 'regex-local' && hasMaterial) return;
+
   const ps = prev.signals || {};
   card.signals = {
     ...(card.signals || {}),
