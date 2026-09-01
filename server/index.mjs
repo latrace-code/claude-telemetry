@@ -86,6 +86,57 @@ function safeId(v) { return typeof v === 'string' && SAFE_SEGMENT.test(v) && v.l
 // donc ils la posent au meme endroit.
 const sharesPromptText = card => !!(card && card.shares && card.shares.prompt_text);
 
+// Ecriture conditionnelle d'une fiche.
+//
+// Les deux routes qui ecrivent relisent d'abord ce qui est stocke -- report de verdict pour l'une,
+// verdict a poser pour l'autre -- et ecrivent ENSUITE. Sans condition, le dernier arrive gagne, et
+// il gagne avec ce qu'il a lu AVANT. Les deux sens abiment :
+//
+//   - le juge qui finit en dernier repose la fiche telle qu'il l'avait telechargee, et RESSUSCITE le
+//     verbatim que le poste venait de retirer -- dans l'objet a retention illimitee ;
+//   - le poste qui finit en dernier efface le verdict que le juge vient de poser, ce qui a deja
+//     coute 84 verdicts en une passe.
+//
+// La fenetre est celle d'un aller-retour GCS, et un poste qui reprend une conversation pendant que
+// la machine d'audit juge la meme session n'a rien d'exotique : les deux routes sont appelees par
+// des machines differentes, rien ne les serialise.
+//
+// On epingle donc la generation lue et on n'ecrit que si l'objet n'a pas bouge ; sinon on recommence
+// sur la version fraiche. `apply` est rappele a chaque tentative avec ce qui est REELLEMENT stocke :
+// il doit etre une fonction de la fiche lue et de rien d'autre, et rend la fiche a ecrire ou null
+// pour renoncer.
+const RMW_TRIES = 5;
+
+async function updateCard(name, apply) {
+  const bucket = storage.bucket(BUCKET);
+  for (let i = 0; i < RMW_TRIES; i++) {
+    let prev = null;
+    let generation = 0;   // 0 : precondition GCS "l'objet n'existe pas encore"
+    try {
+      const [meta] = await bucket.file(name).getMetadata();
+      generation = meta.generation;
+      // Lecture EPINGLEE sur cette generation : sans ca l'objet pourrait changer entre le getMetadata
+      // et le download, et on ecrirait sous une condition qui ne decrit pas ce qu'on a lu.
+      const [buf] = await bucket.file(name, { generation }).download();
+      prev = JSON.parse(buf.toString('utf8'));
+    } catch { prev = null; }   // pas encore deposee, ou illisible : on ecrit par-dessus
+    const next = await apply(prev);
+    if (!next) return null;
+    try {
+      await bucket.file(name).save(JSON.stringify(next, null, 1), {
+        contentType: 'application/json',
+        resumable: false,
+        preconditionOpts: { ifGenerationMatch: generation },
+      });
+      return next;
+    } catch (e) {
+      // 412 : quelqu'un a ecrit entre notre lecture et notre ecriture. On relit et on recommence.
+      if (!e || (e.code !== 412 && e.status !== 412)) throw e;
+    }
+  }
+  throw new Error(`card update: ${RMW_TRIES} conflits d'affilee sur ${name}`);
+}
+
 // Une fiche est REEMISE a chaque reprise de conversation, et en masse par un recompute. Le verdict
 // du juge, lui, ne vit QUE dans le bucket : le poste ne l'a jamais eu, il repose donc une fiche
 // sans jugement. Sans ce report, chaque reemission effacait le verdict deja pose -- 84 verdicts et
@@ -94,7 +145,7 @@ const sharesPromptText = card => !!(card && card.shares && card.shares.prompt_te
 // seulement si elle n'apporte pas de jugement qui vaille mieux. Un jugement pose en local AVANT
 // l'envoi gagne (poste de Lucas) ; le repli regex de `judgeLocally`, non -- un verdict haiku deja
 // stocke lui est superieur, et se laisser ecraser par lui serait perdre un verdict.
-async function carryOverVerdict(file, card) {
+function carryOverVerdict(prev, card) {
   // Une fiche qui apporte son propre jugement gagne -- SAUF si ce jugement est le repli regex du
   // poste, car le bucket peut porter un verdict haiku qui vaut mieux. Le cas est etroit mais reel :
   // un envoi partiel (fiche et transcript mere passes, un fichier d'agent en echec) laisse l'item en
@@ -104,10 +155,7 @@ async function carryOverVerdict(file, card) {
   // gagnant sur tout.
   const localFallback = card.judged === true && card.judged_by === 'regex-local';
   if (card.judged && !localFallback) return;
-  let prev;
-  try { prev = JSON.parse((await file.download())[0].toString('utf8')); }
-  catch { return; } // premiere ecriture de cette fiche : rien a reporter
-  if (!prev || !prev.judged) return;
+  if (!prev || !prev.judged) return;   // premiere ecriture de cette fiche : rien a reporter
 
   // Le repli ne cede qu'a un verdict haiku, et seulement sur la MEME matiere.
   //
@@ -177,11 +225,13 @@ async function handleSession(req, res) {
   if (!sid) return fail(res, 400, 'invalid sid');
 
   card.received_at = new Date().toISOString();
-  const file = storage.bucket(BUCKET).file(`cards/${user}/${date}_${sid}.json`);
-  await carryOverVerdict(file, card);
-  await file.save(JSON.stringify(card, null, 1), {
-    contentType: 'application/json',
-    resumable: false,
+  // La fiche entrante est reconstruite a CHAQUE tentative : `carryOverVerdict` la modifie, et la
+  // rejouer sur la fiche deja modifiee reporterait le verdict de la lecture precedente, pas de
+  // celle qui vient d'etre relue.
+  await updateCard(`cards/${user}/${date}_${sid}.json`, prev => {
+    const next = { ...card };
+    carryOverVerdict(prev, next);
+    return next;
   });
   ok(res, { stored: true });
 }
@@ -200,39 +250,41 @@ async function handleVerdict(req, res) {
   const date = SAFE_DATE.test(body.date || '') ? body.date : null;
   if (!sid || !date) return fail(res, 400, 'invalid sid/date');
 
-  const file = storage.bucket(BUCKET).file(`cards/${user}/${date}_${sid}.json`);
-  let card;
-  try { card = JSON.parse((await file.download())[0].toString('utf8')); }
-  catch { return fail(res, 404, 'card not found'); }
-
   // On ne prend du verdict QUE ce que le juge a mesure. Tout le reste de la fiche appartient au poste.
   const v = (body.verdict && typeof body.verdict === 'object') ? body.verdict : {};
   const n = x => (Number.isFinite(x) && x >= 0 ? Math.trunc(x) : 0);
-  card.signals = {
-    ...(card.signals || {}),
-    friction: n(v.friction),
-    correction: n(v.correction),
-    regression: n(v.regression),
-  };
-  // Le juge lit le TRANSCRIPT : il voit donc le texte des prompts meme quand le poste a demande a ne
-  // pas le stocker en fiche. Sans ce garde-fou le verdict le reinjecterait dans la fiche, c'est-a-dire
-  // dans l'objet a retention illimitee : le reglage du poste serait contourne par le chemin le plus
-  // durable du systeme.
-  const keepText = sharesPromptText(card);
-  card.friction_prompts = Array.isArray(v.friction_prompts)
-    ? v.friction_prompts.slice(0, 100).map(f => ({
-        ...(keepText ? { text: String(f && f.text || '').slice(0, 240) } : {}),
-        turns: n(f && f.turns),
-        min: n(f && f.min),
-        famille: typeof (f && f.famille) === 'string' ? f.famille.slice(0, 40) : null,
-      }))
-    : [];
-  card.judged = true;
-  card.judged_by = 'llm';
-  card.judged_at = new Date().toISOString();
 
-  await file.save(JSON.stringify(card, null, 1), { contentType: 'application/json', resumable: false });
-  ok(res, { judged: true, friction: card.signals.friction });
+  // Tout ce qui suit se decide sur la fiche RELUE a chaque tentative, `keepText` compris : le juge a
+  // pu telecharger une version que le poste a remplacee depuis, et poser le texte selon un opt-in
+  // qui n'est plus le sien.
+  const written = await updateCard(`cards/${user}/${date}_${sid}.json`, card => {
+    if (!card) return null;
+    card.signals = {
+      ...(card.signals || {}),
+      friction: n(v.friction),
+      correction: n(v.correction),
+      regression: n(v.regression),
+    };
+    // Le juge lit le TRANSCRIPT : il voit donc le texte des prompts meme quand le poste a demande a ne
+    // pas le stocker en fiche. Sans ce garde-fou le verdict le reinjecterait dans la fiche, c'est-a-dire
+    // dans l'objet a retention illimitee : le reglage du poste serait contourne par le chemin le plus
+    // durable du systeme.
+    const keepText = sharesPromptText(card);
+    card.friction_prompts = Array.isArray(v.friction_prompts)
+      ? v.friction_prompts.slice(0, 100).map(f => ({
+          ...(keepText ? { text: String(f && f.text || '').slice(0, 240) } : {}),
+          turns: n(f && f.turns),
+          min: n(f && f.min),
+          famille: typeof (f && f.famille) === 'string' ? f.famille.slice(0, 40) : null,
+        }))
+      : [];
+    card.judged = true;
+    card.judged_by = 'llm';
+    card.judged_at = new Date().toISOString();
+    return card;
+  });
+  if (!written) return fail(res, 404, 'card not found');
+  ok(res, { judged: true, friction: written.signals.friction });
 }
 
 async function handleSign(req, res) {
