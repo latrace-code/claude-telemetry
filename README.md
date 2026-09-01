@@ -225,6 +225,23 @@ entrante ne partage pas son verbatim, ce report ne recopie que les *mesures* du 
 reprise de conversation suffirait à remettre le texte qu'un poste vient de retirer — par le chemin
 même qui existe pour ne rien perdre.
 
+Les deux routes qui écrivent une fiche relisent d'abord ce qui est stocké, et **rien ne les
+sérialise** : elles sont appelées par des machines différentes, le poste d'un côté et la machine
+d'audit de l'autre. L'écriture est donc conditionnelle — la génération lue est épinglée, l'écriture
+n'est acceptée que si l'objet n'a pas bougé, sinon on relit et on rejoue. Sans ça, le juge qui finit
+en dernier repose la fiche telle qu'il l'avait téléchargée et ressuscite le verbatim que le poste
+venait de retirer ; et le poste qui finit en dernier efface le verdict que le juge venait de poser.
+
+Ce mécanisme repose sur des garanties de GCS qu'aucun test unitaire ne peut vérifier.
+`server/smoke-conditional-write.mjs` les exerce contre le vrai bucket, sur un objet jetable hors du
+préfixe `cards/`, et exécute la vraie fonction en provoquant une écriture concurrente. À lancer
+avant tout déploiement qui touche à `updateCard` :
+
+```bash
+cd server && npm install
+node smoke-conditional-write.mjs
+```
+
 ## Auditer
 
 ```bash
