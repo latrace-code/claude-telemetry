@@ -91,14 +91,27 @@ const sharesPromptText = card => !!(card && card.shares && card.shares.prompt_te
 // sans jugement. Sans ce report, chaque reemission effacait le verdict deja pose -- 84 verdicts et
 // 190 frictions perdus en une seule passe le 27/07, reposes a la main.
 // Regle : la fiche entrante gagne sur TOUT, sauf sur les champs que seul le juge produit, et
-// seulement si elle n'apporte pas de jugement elle-meme (cas du poste de Lucas, ou le juge tourne
-// en local et ecrit dans la fiche avant l'envoi).
+// seulement si elle n'apporte pas de jugement qui vaille mieux. Un jugement pose en local AVANT
+// l'envoi gagne (poste de Lucas) ; le repli regex de `judgeLocally`, non -- un verdict haiku deja
+// stocke lui est superieur, et se laisser ecraser par lui serait perdre un verdict.
 async function carryOverVerdict(file, card) {
-  if (card.judged) return;
+  // Une fiche qui apporte son propre jugement gagne -- SAUF si ce jugement est le repli regex du
+  // poste, car le bucket peut porter un verdict haiku qui vaut mieux. Le cas est etroit mais reel :
+  // un envoi partiel (fiche et transcript mere passes, un fichier d'agent en echec) laisse l'item en
+  // file ; le juge tourne entre-temps sur le transcript stocke ; le poste coupe `transcripts` ; la
+  // tentative suivante rejuge a la regex et ecraserait le verdict haiku par le moins bon des deux.
+  // C'est la perte de verdict du 27/07 par l'autre porte : celle que la fiche entrante ouvre en
+  // gagnant sur tout.
+  const localFallback = card.judged === true && card.judged_by === 'regex-local';
+  if (card.judged && !localFallback) return;
   let prev;
   try { prev = JSON.parse((await file.download())[0].toString('utf8')); }
   catch { return; } // premiere ecriture de cette fiche : rien a reporter
   if (!prev || !prev.judged) return;
+
+  // Le repli ne cede qu'a un verdict haiku. Deux replis face a face, c'est le plus frais qui vaut :
+  // celui qui arrive vient d'etre calcule sur le transcript tel qu'il est aujourd'hui.
+  if (localFallback && prev.judged_by !== 'llm') return;
 
   // Un verdict de regex locale ne vaut que tant qu'AUCUN transcript n'est a portee du juge : c'est le
   // repli d'un poste qui ne partage pas sa matiere, pas un resultat qui se defend contre haiku. Deux
