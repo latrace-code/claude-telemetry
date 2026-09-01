@@ -119,8 +119,14 @@ async function carryOverVerdict(file, card) {
   // reprise le fait avancer. A defaut de date, on garde le verdict haiku : c'est le sens qui protege.
   //
   // Deux replis face a face, c'est le plus frais qui vaut.
+  //
+  // Ce qui est stocke est presume venir du juge SAUF s'il se declare lui-meme repli : avant
+  // `judged_by`, tout verdict pose dans le bucket venait de la machine d'audit, et ces fiches-la
+  // n'ont donc pas de provenance. Lire "pas de provenance" comme "pas haiku" les ferait ecraser par
+  // une regex -- c'est-a-dire perdre en priorite les verdicts les plus anciens.
+  const prevIsFallback = prev.judged_by === 'regex-local';
   const advanced = String(card.ts_end || '') > String(prev.ts_end || '');
-  if (localFallback && (prev.judged_by !== 'llm' || advanced)) return;
+  if (localFallback && (prevIsFallback || advanced)) return;
 
   // Un verdict de regex locale ne vaut que tant qu'AUCUN transcript n'est a portee du juge : c'est le
   // repli d'un poste qui ne partage pas sa matiere, pas un resultat qui se defend contre haiku. Deux
@@ -131,7 +137,7 @@ async function carryOverVerdict(file, card) {
   // sur `judged`. C'est le meme aller-retour que cote client, une couche plus bas.
   // Une provenance inconnue, elle, est un verdict d'ailleurs : il se reporte.
   const hasMaterial = (card.shares && card.shares.transcripts === true) || card.recomputed === true;
-  if (prev.judged_by === 'regex-local' && hasMaterial) return;
+  if (prevIsFallback && hasMaterial) return;
 
   const ps = prev.signals || {};
   card.signals = {
@@ -152,8 +158,11 @@ async function carryOverVerdict(file, card) {
   // `judged_by` fait partie du verdict au meme titre que ses mesures : une regex locale et un verdict
   // haiku n'ont pas la meme valeur, et reporter les chiffres sans dire d'ou ils viennent rendrait la
   // distinction inexploitable des la premiere reprise de conversation. Absent chez `prev` : fiche
-  // jugee avant l'introduction du champ, on ne l'invente pas.
+  // jugee avant l'introduction du champ, on ne l'invente pas -- et on RETIRE l'etiquette de la fiche
+  // entrante, sinon un verdict d'audit repris ressortirait signe `regex-local` : la mesure dirait une
+  // chose et la provenance une autre, ce que ce champ existe justement pour empecher.
   if (prev.judged_by) card.judged_by = prev.judged_by;
+  else delete card.judged_by;
   card.judged_at = prev.judged_at || null;
 }
 
