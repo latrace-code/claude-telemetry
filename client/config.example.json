@@ -1,6 +1,7 @@
 {
   "endpoint": "https://<service>/",
   "token": "<jeton d'ingestion>",
+  "user": "<prenom>",
   "version": "1.0.0",
-  "include_projects": []
+  "include_projects": ["/chemin/absolu/vers/un/depot"]
 }
