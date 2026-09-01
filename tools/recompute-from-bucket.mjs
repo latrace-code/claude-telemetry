@@ -104,6 +104,9 @@ for (const s of sessions.values()) {
       card.signals = { ...card.signals, ...pick(old.signals, ['friction', 'correction', 'regression']) };
       card.friction_prompts = old.friction_prompts || [];
       card.judged = true;
+      // La provenance voyage avec le verdict : reprendre les mesures en laissant tomber `judged_by`
+      // ferait passer pour indetermine un verdict haiku parfaitement identifie.
+      if (old.judged_by) card.judged_by = old.judged_by;
       card.judged_at = old.judged_at;
     }
     // `shares` dit ce que le poste a declare partager. Cette passe RECONSTRUIT `subject`, les

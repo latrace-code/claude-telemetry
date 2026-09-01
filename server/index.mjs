@@ -115,6 +115,11 @@ async function carryOverVerdict(file, card) {
     ? prevPrompts
     : prevPrompts.map(f => { const { text, ...rest } = f || {}; return rest; });
   card.judged = true;
+  // `judged_by` fait partie du verdict au meme titre que ses mesures : une regex locale et un verdict
+  // haiku n'ont pas la meme valeur, et reporter les chiffres sans dire d'ou ils viennent rendrait la
+  // distinction inexploitable des la premiere reprise de conversation. Absent chez `prev` : fiche
+  // jugee avant l'introduction du champ, on ne l'invente pas.
+  if (prev.judged_by) card.judged_by = prev.judged_by;
   card.judged_at = prev.judged_at || null;
 }
 
