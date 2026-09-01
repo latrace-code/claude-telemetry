@@ -109,9 +109,18 @@ async function carryOverVerdict(file, card) {
   catch { return; } // premiere ecriture de cette fiche : rien a reporter
   if (!prev || !prev.judged) return;
 
-  // Le repli ne cede qu'a un verdict haiku. Deux replis face a face, c'est le plus frais qui vaut :
-  // celui qui arrive vient d'etre calcule sur le transcript tel qu'il est aujourd'hui.
-  if (localFallback && prev.judged_by !== 'llm') return;
+  // Le repli ne cede qu'a un verdict haiku, et seulement sur la MEME matiere.
+  //
+  // Une reprise de conversation reemet la fiche sur un transcript plus long. Le verdict stocke ne
+  // couvre alors que le debut, et comme le poste ne partage plus son transcript, personne ne le
+  // rafraichira jamais : les frictions du travail repris seraient perdues sans retour. Le repli, lui,
+  // vient d'etre calcule sur la totalite. `ts_end` dit jusqu'ou va chaque fiche -- une simple
+  // retransmission (l'item est reste en file, sa fiche n'a pas bouge) le laisse identique, une
+  // reprise le fait avancer. A defaut de date, on garde le verdict haiku : c'est le sens qui protege.
+  //
+  // Deux replis face a face, c'est le plus frais qui vaut.
+  const advanced = String(card.ts_end || '') > String(prev.ts_end || '');
+  if (localFallback && (prev.judged_by !== 'llm' || advanced)) return;
 
   // Un verdict de regex locale ne vaut que tant qu'AUCUN transcript n'est a portee du juge : c'est le
   // repli d'un poste qui ne partage pas sa matiere, pas un resultat qui se defend contre haiku. Deux
