@@ -83,11 +83,20 @@ export function redactCard(card, cfg) {
   // Les requetes de recherche memoire sont tapees a la main : verbatim aussi. Leur NOMBRE repond
   // deja a la question posee par ces champs (la session est-elle allee fouiller, et combien).
   // Les chemins lus/ecrits restent : ce sont des noms de fichiers du depot, pas une saisie.
-  for (const k of ['brain', 'brain_all']) {
-    const b = card[k];
-    if (!b || !Array.isArray(b.searches)) continue;
-    const { searches, ...rest } = b;
-    card[k] = { ...rest, searches_n: searches.length };
+  //
+  // TROIS copies portent les memes requetes, pas deux : `brain` (la mere), `brain_all` (mere +
+  // agents) et `sidechains.brain` (les agents seuls). La troisieme est produite par scanSidechains,
+  // dans un autre objet et un autre bout de la lib, et c'est exactement pour ca qu'elle avait ete
+  // oubliee : le verbatim survivait par la copie qu'on ne regarde pas. Un agent qui fouille la
+  // memoire tape les memes requetes que la mere, et souvent d'autres qu'elle.
+  for (const holder of [card, card.sidechains]) {
+    if (!holder) continue;
+    for (const k of ['brain', 'brain_all']) {
+      const b = holder[k];
+      if (!b || !Array.isArray(b.searches)) continue;
+      const { searches, ...rest } = b;
+      holder[k] = { ...rest, searches_n: searches.length };
+    }
   }
   return card;
 }
