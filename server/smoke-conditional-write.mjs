@@ -47,6 +47,27 @@ async function loadUpdateCard() {
   return (await import('data:text/javascript,' + encodeURIComponent(mod))).updateCard;
 }
 
+// Prevol. Sans lui, une absence d'identifiants ressort en "ECHEC creation" : ca se lit comme un
+// verdict sur le mecanisme alors qu'aucun test n'a tourne, et c'est la pire sortie possible pour un
+// script dont le seul role est de dire si on peut deployer. Un 404 sur l'objet jetable est la bonne
+// nouvelle : on est authentifie, et il n'existe pas encore.
+async function preflight() {
+  try { await bucket.file(NAME).getMetadata(); return null; }   // deja la : on l'ecrasera
+  catch (e) {
+    const code = e && (e.code || e.status);
+    const m = String((e && e.message) || e);
+    // 404 sur l'objet jetable est la BONNE nouvelle : on est authentifie et il n'existe pas encore.
+    // 404 sur le bucket, non -- seul le message les distingue.
+    if (code === 404) return /bucket/i.test(m) ? `bucket gs://${BUCKET} introuvable.` : null;
+    if (code === 401 || /default credentials|invalid_grant|unauthenticated/i.test(m)) {
+      return 'pas authentifie.\n  Lancer :  gcloud auth application-default login'
+        + '\n  (sous PowerShell, si l\'execution de scripts est desactivee : gcloud.cmd auth application-default login)';
+    }
+    if (code === 403 || /permission|forbidden/i.test(m)) return `ce compte n'a pas les droits sur gs://${BUCKET}.`;
+    return m;
+  }
+}
+
 let failures = 0;
 function check(label, ok, detail = '') {
   console.log(`${ok ? ' OK ' : 'ECHEC'}  ${label}${detail ? `  (${detail})` : ''}`);
@@ -59,6 +80,15 @@ const write = (body, generation) => bucket.file(NAME).save(JSON.stringify(body),
 
 async function main() {
   console.log(`bucket ${BUCKET}, objet ${NAME}\n`);
+
+  const bloque = await preflight();
+  if (bloque) {
+    console.error(`impossible de tester : ${bloque}
+
+Aucun test n'a tourne -- ceci ne dit RIEN du mecanisme.`);
+    process.exit(2);
+  }
+
   await bucket.file(NAME).delete({ ignoreNotFound: true });
 
   // 1. Creation conditionnelle : c'est ce que fait `updateCard` quand la fiche n'existe pas encore.
