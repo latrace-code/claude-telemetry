@@ -55,6 +55,17 @@ retrouve pas si le réglage repasse à `true`, elle annoncerait un texte qu'elle
 chemins pouvaient le reposer une fois la fiche stockée, le report de verdict et le rejeu depuis le
 bucket : ils appliquent la même règle, voir *Architecture* et *Rattrapage*.
 
+**Ce que ce réglage ne rattrape pas : les postes qui ne l'ont pas encore.** Le caviardage vit sur le
+poste. Un poste resté sur une version antérieure du capteur continue donc d'envoyer `subject`, le
+texte de ses frictions et ses requêtes mémoire, et le service les stocke : sa fiche arrive **sans**
+`shares`, c'est-à-dire sans choix exprimé — pas avec un choix négatif. Le service ne tranche pas à sa
+place. Il refuse seulement d'*ajouter* du verbatim à une telle fiche (le verdict du juge, §
+*Architecture*), parce que ce texte-là, lui, ne vient pas du poste. Comme `autoUpdate` vaut `false`
+pour ce marketplace, un poste peut rester gelé des semaines : c'est précisément à quoi sert la
+deuxième ligne de l'installation. Faire trancher le service à la place des postes gelés tiendrait en
+une ligne, mais viderait la colonne Sujet de toute la flotte non mise à jour, historique poussé par
+`push-local-cards` compris — c'est un choix d'équipe, pas un défaut à corriger en silence.
+
 ## Installation (poste Mac ou Windows)
 
 ```
