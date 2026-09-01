@@ -161,6 +161,26 @@ function judgeLocally(item, detector) {
   } catch { /* transcript purge depuis : la fiche part telle quelle, judged:false */ }
 }
 
+// Et le sens inverse : le transcript repart, donc la passe haiku aura de la matiere et fera mieux
+// que la regex. Le verdict local qu'on avait pose empecherait justement de la reprendre -- cette
+// passe filtre sur `judged` -- et on garderait le moins bon des deux verdicts pour toujours.
+//
+// Effacer un verdict est ce qui a coute 84 verdicts le 27/07, mais c'etait AVANT carryOverVerdict :
+// une fiche qui repart `judged:false` se voit desormais reposer le verdict deja stocke par le
+// serveur, s'il en existe un. Le seul intervalle a nu est celui d'avant la passe haiku, qui est
+// l'etat normal de toute fiche d'un poste qui partage ses transcripts.
+//
+// UNIQUEMENT le verdict qu'on a pose nous-memes : un `judged:true` sans provenance ne vient pas
+// d'ici, on n'y touche pas. Les signaux repassent a null et pas a zero -- `judged:false` avec
+// friction:0 dirait "juge, rien trouve" la ou il faut lire "pas encore juge", et confondre les deux
+// est la panne du 16/07.
+function unjudgeLocal(card) {
+  card.signals = { ...(card.signals || {}), friction: null, regression: null, correction: null, validation: null };
+  card.friction_prompts = [];
+  card.judged = false;
+  delete card.judged_by;
+}
+
 async function drain() {
   let names = [];
   try { names = readdirSync(QUEUE_DIR).filter(n => n.endsWith('.json')); } catch { return; }
@@ -180,11 +200,14 @@ async function drain() {
     // retirer : c'est le seul endroit qui sait ce que le poste veut aujourd'hui.
     //
     // Le detecteur suit la meme regle, et `localDetector` porte deja la decision : il rend le
-    // detecteur regex quand le transcript ne part pas, null quand il part. En regime normal la fiche
-    // est deja jugee (le hook a pris la meme decision), donc ceci ne coute rien ; ca ne se declenche
-    // que sur les fiches qui ont change de monde entre leur calcul et leur envoi.
+    // detecteur regex quand le transcript ne part pas, null quand il part. LES DEUX SENS comptent,
+    // parce qu'une fiche peut avoir change de monde entre son calcul et son envoi : sans transcript
+    // il faut poser un verdict que personne d'autre ne posera, avec transcript il faut retirer le
+    // notre pour que la passe haiku puisse faire mieux. En regime normal aucun des deux ne se
+    // declenche, le hook ayant pris la meme decision sur la meme config.
     const detector = localDetector(cfg);
     if (detector && !item.card.judged) judgeLocally(item, detector);
+    else if (!detector && item.card.judged_by === 'regex-local') unjudgeLocal(item.card);
     redactCard(item.card, cfg);
     try {
       await sendOne(item);
