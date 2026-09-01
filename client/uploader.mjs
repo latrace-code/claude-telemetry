@@ -139,6 +139,28 @@ function markSent(sid) {
   try { writeFileSync(SENT_FILE, JSON.stringify(trimmed)); } catch { /* disque plein */ }
 }
 
+// Le detecteur local se choisit AUSSI a l'envoi, et pour la meme raison que le caviardage : la fiche
+// a pu etre calculee quand le transcript partait encore. Elle sort alors `judged:false`, ce qui est
+// voulu -- la passe haiku fait mieux, et elle la reprendra depuis le transcript stocke. Mais si le
+// poste a coupe `transcripts` entre-temps, ce transcript ne partira plus : le juge n'aura jamais de
+// matiere et `signals.friction` resterait null POUR TOUJOURS, exactement le trou que ce reglage
+// devait eviter. Meme cas pour une fiche enfilee par une version anterieure du capteur.
+//
+// On repasse donc le detecteur deterministe sur le transcript, encore present sur le disque, et on
+// ne releve que le verdict -- les compteurs de la fiche, eux, ont ete calcules par le hook avec les
+// sidechains sous la main, et ils font foi. A appeler AVANT redactCard : les frictions produites ici
+// portent leur texte.
+function judgeLocally(item, detector) {
+  try {
+    const fresh = analyzeTranscript(readEvents(readFileSync, item.transcript_path), { sid: item.card.sid }, detector);
+    const { friction, regression, correction, validation } = fresh.signals || {};
+    item.card.signals = { ...(item.card.signals || {}), friction, regression, correction, validation };
+    item.card.friction_prompts = fresh.friction_prompts || [];
+    item.card.judged = true;
+    item.card.judged_by = 'regex-local';
+  } catch { /* transcript purge depuis : la fiche part telle quelle, judged:false */ }
+}
+
 async function drain() {
   let names = [];
   try { names = readdirSync(QUEUE_DIR).filter(n => n.endsWith('.json')); } catch { return; }
@@ -156,6 +178,13 @@ async function drain() {
     // `false` enverrait quand meme le verbatim de tout ce qui trainait dans la file, et couper le
     // reglage ne couperait rien pour les fiches deja calculees. Repasser le caviardage ne peut que
     // retirer : c'est le seul endroit qui sait ce que le poste veut aujourd'hui.
+    //
+    // Le detecteur suit la meme regle, et `localDetector` porte deja la decision : il rend le
+    // detecteur regex quand le transcript ne part pas, null quand il part. En regime normal la fiche
+    // est deja jugee (le hook a pris la meme decision), donc ceci ne coute rien ; ca ne se declenche
+    // que sur les fiches qui ont change de monde entre leur calcul et leur envoi.
+    const detector = localDetector(cfg);
+    if (detector && !item.card.judged) judgeLocally(item, detector);
     redactCard(item.card, cfg);
     try {
       await sendOne(item);
