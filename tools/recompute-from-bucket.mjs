@@ -25,6 +25,7 @@ import { execFileSync } from 'node:child_process';
 import { createGunzip } from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import { analyzeTranscript, readEvents, scanSidechains } from '../client/telemetry-lib.mjs';
+import { redactCard } from '../client/privacy.mjs';
 
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i > -1 ? process.argv[i + 1] : d; };
 const user = arg('user');
@@ -105,6 +106,15 @@ for (const s of sessions.values()) {
       card.judged = true;
       card.judged_at = old.judged_at;
     }
+    // `shares` dit ce que le poste a declare partager. Cette passe RECONSTRUIT `subject`, les
+    // requetes memoire et le texte des frictions depuis le transcript stocke : sur un poste qui
+    // partage son transcript mais pas son verbatim, elle reposerait donc exactement ce qu'il avait
+    // retire, et une simple passe de maintenance annulerait son reglage. La machine qui rejoue ne
+    // connait pas sa config ; la fiche stockee la porte, et elle suffit.
+    // Regle : un rejeu ne rend jamais une fiche plus bavarde que celle qu'il remplace. Une fiche
+    // anterieure au reglage n'a pas de `shares` et garde son sujet -- ce verbatim est deja stocke,
+    // le rejeu n'a pas a l'effacer, seulement a ne rien rajouter.
+    if (old.shares) redactCard(card, old.shares);
     card.user = card.user || user;
     card.recomputed = true;
 

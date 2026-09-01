@@ -79,6 +79,13 @@ function safeRelPath(name) {
 
 function safeId(v) { return typeof v === 'string' && SAFE_SEGMENT.test(v) && v.length <= 100 ? v : null; }
 
+// Ce que le poste a declare partager voyage avec sa fiche : le serveur n'a aucun autre moyen de le
+// savoir. Une fiche sans `shares` vient d'un client anterieur au reglage, donc aucun opt-in n'a ete
+// exprime -- pas de texte. Deux chemins ecrivent du verbatim sur une fiche stockee, le verdict du
+// juge et le REPORT de ce verdict sur une reemission : ils posent tous les deux la meme question,
+// donc ils la posent au meme endroit.
+const sharesPromptText = card => !!(card && card.shares && card.shares.prompt_text);
+
 // Une fiche est REEMISE a chaque reprise de conversation, et en masse par un recompute. Le verdict
 // du juge, lui, ne vit QUE dans le bucket : le poste ne l'a jamais eu, il repose donc une fiche
 // sans jugement. Sans ce report, chaque reemission effacait le verdict deja pose -- 84 verdicts et
@@ -99,7 +106,14 @@ async function carryOverVerdict(file, card) {
     correction: ps.correction ?? null,
     regression: ps.regression ?? null,
   };
-  card.friction_prompts = Array.isArray(prev.friction_prompts) ? prev.friction_prompts : [];
+  // Le verdict reporte a ete pose quand le poste partageait encore son verbatim ; la fiche qui
+  // arrive dit qu'il ne le partage plus. On reporte les MESURES du juge, pas ses phrases : sinon une
+  // simple reprise de conversation reinjecterait le texte que le poste vient de retirer, et l'opt-out
+  // serait annule par le chemin qui existe justement pour ne rien perdre.
+  const prevPrompts = Array.isArray(prev.friction_prompts) ? prev.friction_prompts : [];
+  card.friction_prompts = sharesPromptText(card)
+    ? prevPrompts
+    : prevPrompts.map(f => { const { text, ...rest } = f || {}; return rest; });
   card.judged = true;
   card.judged_at = prev.judged_at || null;
 }
@@ -155,9 +169,8 @@ async function handleVerdict(req, res) {
   // Le juge lit le TRANSCRIPT : il voit donc le texte des prompts meme quand le poste a demande a ne
   // pas le stocker en fiche. Sans ce garde-fou le verdict le reinjecterait dans la fiche, c'est-a-dire
   // dans l'objet a retention illimitee : le reglage du poste serait contourne par le chemin le plus
-  // durable du systeme. Une fiche sans `shares` vient d'un client anterieur au reglage, donc aucun
-  // opt-in n'a ete exprime : on ne stocke pas le texte.
-  const keepText = !!(card.shares && card.shares.prompt_text);
+  // durable du systeme.
+  const keepText = sharesPromptText(card);
   card.friction_prompts = Array.isArray(v.friction_prompts)
     ? v.friction_prompts.slice(0, 100).map(f => ({
         ...(keepText ? { text: String(f && f.text || '').slice(0, 240) } : {}),

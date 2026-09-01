@@ -149,6 +149,14 @@ async function drain() {
     // Filet : un item hors perimetre (enfile avant l'activation de l'allowlist, ou par une version
     // anterieure du capteur) est retire de la file sans etre envoye.
     if (!projectAllowed(basename(dirname(item.transcript_path || '')), cfg)) { try { unlinkSync(p); } catch {} continue; }
+    // Le reglage s'applique a l'instant ou la fiche PART, pas a celui ou elle a ete calculee. Une
+    // fiche peut avoir attendu ici plusieurs jours (cinq tentatives), avoir ete enfilee par une
+    // version anterieure du capteur -- donc avec tout son verbatim et sans `shares` -- ou avoir
+    // traverse un changement d'avis du poste. Sans ce second passage, une mise a jour vers le defaut
+    // `false` enverrait quand meme le verbatim de tout ce qui trainait dans la file, et couper le
+    // reglage ne couperait rien pour les fiches deja calculees. Repasser le caviardage ne peut que
+    // retirer : c'est le seul endroit qui sait ce que le poste veut aujourd'hui.
+    redactCard(item.card, cfg);
     try {
       await sendOne(item);
       markSent(item.card.sid);

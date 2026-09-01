@@ -55,9 +55,18 @@ export function localDetector(cfg) {
 // A appeler APRES le filtre `!card.subject` des appelants : `subject` sert de garde ("cette session
 // a-t-elle vraiment eu lieu"), il ne doit etre efface qu'une fois cette garde passee. L'ordre
 // inverse jetterait toutes les fiches d'un poste qui ne partage pas son verbatim.
+//
+// Idempotente, et repassee au moment de l'ENVOI : une fiche calculee ne part pas toujours dans la
+// foulee (file d'attente, cinq tentatives, mise a jour du capteur entre-temps), et c'est l'instant
+// ou elle sort du poste qui compte, pas celui ou elle a ete calculee.
 export function redactCard(card, cfg) {
-  card.shares = { transcripts: shareTranscripts(cfg), prompt_text: sharePromptText(cfg) };
-  if (sharePromptText(cfg)) return card;
+  // Le caviardage est destructif : une fiche qui a deja perdu son verbatim ne peut pas le retrouver.
+  // Repasser dessus avec un reglage devenu permissif ne doit donc pas la redeclarer partageuse : elle
+  // annoncerait un texte qu'elle n'a plus, et le serveur autoriserait le juge a l'y remettre.
+  const redacted = !!(card.shares && card.shares.prompt_text === false);
+  const keep = sharePromptText(cfg) && !redacted;
+  card.shares = { transcripts: shareTranscripts(cfg), prompt_text: keep };
+  if (keep) return card;
 
   // Le sujet est le premier prompt tronque : du verbatim. Ce que la session a touche reste lisible
   // par `project` et `branch`, qui sont des metadonnees du depot et pas des mots de quelqu'un.
