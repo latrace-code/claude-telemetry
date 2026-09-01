@@ -63,12 +63,17 @@ bucket : ils appliquent la même règle, voir *Architecture* et *Rattrapage*.
 ```
 
 Puis, dans un terminal, l'adresse et la clé du service (elles ne sont pas dans ce dépôt, qui est
-public), et l'activation des mises à jour automatiques :
+public), **la liste des dossiers à remonter**, et l'activation des mises à jour automatiques :
 
 ```bash
-mkdir -p ~/.latrace-telemetry && printf '%s\n' '{"endpoint":"<url>","token":"<jeton>","user":"<prenom>"}' > ~/.latrace-telemetry/config.json
+mkdir -p ~/.latrace-telemetry && printf '%s\n' '{"endpoint":"<url>","token":"<jeton>","user":"<prenom>","include_projects":["/chemin/absolu/vers/un/depot"]}' > ~/.latrace-telemetry/config.json
 node "$HOME/.claude/plugins/marketplaces/latrace/tools/enable-autoupdate.mjs"
 ```
+
+`include_projects` fait partie de la **première** commande, pas d'un réglage qu'on ajoutera plus
+tard : tant qu'elle est absente, le capteur ne remonte rien, et le rattrapage d'historique du premier
+démarrage (qui part sur tout ce que la machine porte encore) n'a jamais l'occasion de sortir du
+périmètre. Voir la section « Périmètre » plus bas.
 
 La deuxième ligne n'est pas optionnelle : **Claude Code ne met à jour tout seul que les marketplaces
 d'Anthropic**. Pour tous les autres, `autoUpdate` vaut `false` par défaut et le plugin reste épinglé
@@ -100,11 +105,10 @@ vérifié sur une machine sans clé SSH ni credentials).
 Pour couper le capteur : `LATRACE_TELEMETRY_OFF=1`, ou `{"enabled": false}` dans
 `~/.latrace-telemetry/config.json`.
 
-## Périmètre : ne remonter qu'une partie de ses sessions
+## Périmètre : le capteur ne remonte que les dossiers qu'on lui a désignés
 
-Par défaut le capteur remonte **toutes** les sessions Claude Code du poste. Sur une machine qui
-mélange travail d'équipe et projets personnels, on restreint l'envoi à une liste de dossiers avec
-`include_projects` dans `~/.latrace-telemetry/config.json` :
+Le capteur ne remonte **que** les dossiers listés dans `include_projects`
+(`~/.latrace-telemetry/config.json`) :
 
 ```json
 {
@@ -119,17 +123,45 @@ Liste de préfixes de chemins réels. Une session n'est captée que si son dossi
 d'eux ou un sous-dossier (worktrees inclus). Tout le reste - autres projets, dossiers perso - n'est ni
 calculé, ni mis en file, ni rattrapé au bootstrap.
 
-Le chemin doit être **absolu** (`~` est accepté et résolu). Un chemin relatif ne correspondra à rien
-et, l'allowlist étant stricte, **plus aucune session ne remonterait** : c'est le seul mode d'échec
-silencieux de cette option. La comparaison suit le système de fichiers, insensible à la casse sur
-macOS et Windows, sensible sur Linux.
+Le chemin doit être **absolu** (`~` est accepté et résolu). La comparaison suit le système de
+fichiers, insensible à la casse sur macOS et Windows, sensible sur Linux.
 
-- **Liste absente ou vide** : comportement historique, tout remonte. Un poste qui ne configure rien
-  n'est pas affecté.
-- **Allowlist stricte** : par défaut rien ne part, seul ce qui matche est envoyé. Un dossier oublié
-  ne fuite pas, il est ignoré.
-- **À poser avant la première session** : le bootstrap (rattrapage d'historique) respecte la liste,
-  donc elle doit être en place avant le premier démarrage pour qu'aucune session hors périmètre ne parte.
+- **Liste absente ou vide** : **rien ne remonte**. Un poste qui n'a rien configuré est un poste
+  silencieux, pas un poste qui remonte tout.
+- **Allowlist stricte** : seul ce qui matche est envoyé. Un dossier oublié ne fuite pas, il est ignoré.
+- **Tout remonter reste possible, mais se dit** : `"include_projects": ["*"]`. Le joker n'est reconnu
+  que sous cette forme exacte, comme entrée du tableau ; une chaîne nue (`"include_projects": "*"`)
+  vaut liste vide, donc silence.
+
+### Pourquoi ce défaut
+
+Le défaut précédent était l'inverse : liste absente valait « tout le poste ». Deux conséquences qu'on
+n'a pas voulu garder.
+
+D'abord, **un oubli ne coûtait pas la même chose des deux côtés**. Avec l'ancien défaut, oublier la
+liste remontait des dépôts personnels, et personne sur le poste ne pouvait s'en apercevoir - le
+capteur est volontairement invisible. Avec le nouveau, un oubli fait taire le poste : ça se voit dans
+le cockpit, qui alerte déjà sur les capteurs en retard, et ça se répare en une ligne. On a déplacé le
+mode d'échec silencieux vers celui qui ne crée pas de dégât.
+
+Ensuite, **le rattrapage du premier démarrage part sur tout l'historique encore présent sur la
+machine** (voir plus bas), et il respecte le périmètre. Avec l'ancien défaut, l'ordre des étapes
+d'installation décidait de ce qui partait : configurer l'endpoint avant la liste suffisait à envoyer
+d'un coup ~30 jours de sessions, tous dépôts confondus, avant que la liste n'existe. Le nouveau
+défaut rend cet ordre indifférent.
+
+Enfin, le périmètre n'est pas qu'un réglage de confort : c'est ce qui rend le capteur acceptable sur
+une machine qui n'est pas exclusivement de travail. Un consentement qui s'obtient par défaut n'en est
+pas un ; celui-là se donne dossier par dossier, et il est relisible dans un fichier que la personne
+possède.
+
+### Migration
+
+Ce changement **arrête les postes déjà installés qui n'ont pas de `include_projects`** : ils
+remontaient tout, ils ne remonteront plus rien tant qu'ils n'auront pas listé leurs dossiers. C'est
+volontaire et ça demande un mot à l'équipe plutôt qu'un déploiement silencieux - chacun ajoute sa
+liste (ou `["*"]` s'il assume de tout remonter). Rien n'est perdu côté serveur, les fiches déjà
+déposées restent.
 
 Le filtrage porte sur le chemin, pas sur le contenu : un transcript retenu peut toujours contenir ce
 que les commandes ont affiché, donc potentiellement des secrets. Le périmètre réduit ce qui part, il
