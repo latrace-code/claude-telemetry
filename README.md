@@ -14,6 +14,58 @@ Le client **lit** ce que Claude Code a déjà écrit sur le disque, calcule la f
 - Il ne bloque jamais une session : le hook calcule la fiche puis rend la main, l'envoi part dans un
   process détaché.
 
+## Ce qui sort du poste
+
+Trois choses de nature très différente, qui se règlent séparément dans
+`~/.latrace-telemetry/config.json` :
+
+| | Contenu | Réglage | Rétention |
+|---|---|---|---|
+| **Fiche** | compteurs : durées, relances, tours, outils, erreurs, tokens, agents, projet, branche, surface | toujours envoyée | illimitée |
+| **Transcript** | la conversation entière + celle de chaque sous-agent, contenu des fichiers lus et sortie des commandes | `"transcripts": true` | 90 jours |
+| **Extraits verbatim en fiche** | `subject` (90 car du 1er prompt), texte des frictions (40 × 240 car), requêtes de recherche mémoire | `"prompt_text": true` | illimitée |
+
+Les deux réglages valent `false` tant qu'on ne les a pas mis à `true` explicitement. La comparaison
+est stricte : la chaîne `"true"`, ou toute faute de frappe, vaut `false`. Sur un interrupteur qui
+fait sortir du verbatim, l'erreur doit tomber du côté qui protège.
+
+**Ce qui part toujours, quoi qu'on règle** : tous les compteurs. Durées actif/attente/dormant,
+relances humaines, tours d'assistant, appels d'outils et taux d'erreur, tokens, agents, workflows,
+projet, branche, surface, plateforme, hôte. C'est-à-dire tout ce que le cockpit affiche, à
+l'exception de la colonne Sujet et du texte des frictions.
+
+**Le signal de friction survit sans le verbatim.** Le juge (haiku) tourne sur la machine d'audit, à
+partir du transcript stocké : un poste qui ne partage pas son transcript le priverait de matière et
+`signals.friction` resterait `null` pour toujours. Le capteur calcule donc le signal *sur le poste*,
+avec le détecteur regex déterministe déjà présent dans la lib (celui que mesure `judge-bench`), et
+n'envoie que le résultat : le nombre de frictions et leur **coût** — tours et minutes imputés
+jusqu'au prompt humain suivant. La phrase qui les a déclenchées reste sur la machine. `judged_by`
+distingue `regex-local` d'un verdict `llm`.
+
+Pourquoi le défaut est `false` des deux côtés : les extraits verbatim de la fiche ont la rétention
+des **fiches**, illimitée, là où les transcripts purgent à 90 jours. Le verbatim le plus durable du
+système est donc celui qu'on remarque le moins — il n'apparaît nulle part dans l'écran qu'on
+regarde. Un réglage qui fait sortir du verbatim se donne ; il ne s'hérite pas.
+
+**Le réglage s'applique quand la donnée part, pas quand elle a été calculée.** Une fiche ne sort pas
+toujours dans la foulée : elle peut attendre dans la file (cinq tentatives), y avoir été mise par une
+version antérieure du capteur, ou traverser un changement d'avis. Le caviardage est donc repassé au
+drain, avec la config du jour — et c'est un **cliquet** : une fiche qui a perdu son verbatim ne le
+retrouve pas si le réglage repasse à `true`, elle annoncerait un texte qu'elle n'a plus. Deux autres
+chemins pouvaient le reposer une fois la fiche stockée, le report de verdict et le rejeu depuis le
+bucket : ils appliquent la même règle, voir *Architecture* et *Rattrapage*.
+
+**Ce que ce réglage ne rattrape pas : les postes qui ne l'ont pas encore.** Le caviardage vit sur le
+poste. Un poste resté sur une version antérieure du capteur continue donc d'envoyer `subject`, le
+texte de ses frictions et ses requêtes mémoire, et le service les stocke : sa fiche arrive **sans**
+`shares`, c'est-à-dire sans choix exprimé — pas avec un choix négatif. Le service ne tranche pas à sa
+place. Il refuse seulement d'*ajouter* du verbatim à une telle fiche (le verdict du juge, §
+*Architecture*), parce que ce texte-là, lui, ne vient pas du poste. Comme `autoUpdate` vaut `false`
+pour ce marketplace, un poste peut rester gelé des semaines : c'est précisément à quoi sert la
+deuxième ligne de l'installation. Faire trancher le service à la place des postes gelés tiendrait en
+une ligne, mais viderait la colonne Sujet de toute la flotte non mise à jour, historique poussé par
+`push-local-cards` compris — c'est un choix d'équipe, pas un défaut à corriger en silence.
+
 ## Installation (poste Mac ou Windows)
 
 ```
@@ -140,7 +192,7 @@ Le poste n'a aucun credential Google : il demande au service une URL signée à 
 |---|---|
 | Service d'ingestion | Cloud Run `latrace-telemetry-ingest`, europe-west1, projet `latrace31` |
 | Stockage | `gs://latrace-claude-telemetry` (privé, public access prevention, IAM uniforme) |
-| Rétention | fiches : illimitée (1 Ko chacune) · transcripts : purge automatique à 90 jours |
+| Rétention | fiches : illimitée (1 Ko chacune) · transcripts : purge automatique à 90 jours, et envoyés seulement si `"transcripts": true` |
 
 Le service est **en écriture seule** : aucune route ne rend de donnée. Les transcripts contiennent le
 contenu des fichiers lus et la sortie des commandes exécutées, donc potentiellement des credentials.
@@ -160,6 +212,35 @@ poste connaît (surface, hôte, version du client, sidechains) : il n'envoie don
 le serveur le pose sur la fiche stockée. Sans cette route, `signals.friction` restait `null` dans le
 bucket pour toujours et la tuile Frictions du cockpit ne montrait que l'historique backfillé.
 La réponse ne renvoie que ce que l'appelant vient d'écrire : la règle d'écriture seule tient.
+
+Le juge lit le transcript, donc il *voit* le texte des prompts même quand le poste a demandé à ne pas
+le stocker en fiche. Le serveur ne pose donc le texte des frictions que si la fiche stockée porte
+`shares.prompt_text: true` — sans quoi le réglage du poste serait contourné par le chemin le plus
+durable du système. Une fiche sans `shares` vient d'un client antérieur au réglage : aucun opt-in n'a
+été exprimé, le texte n'est pas stocké.
+
+La même règle vaut pour le **report de verdict**. Une fiche est réémise à chaque reprise de
+conversation, et le serveur y recopie le verdict déjà posé pour ne pas l'effacer ; quand la fiche
+entrante ne partage pas son verbatim, ce report ne recopie que les *mesures* du juge. Sans ça, une
+reprise de conversation suffirait à remettre le texte qu'un poste vient de retirer — par le chemin
+même qui existe pour ne rien perdre.
+
+Les deux routes qui écrivent une fiche relisent d'abord ce qui est stocké, et **rien ne les
+sérialise** : elles sont appelées par des machines différentes, le poste d'un côté et la machine
+d'audit de l'autre. L'écriture est donc conditionnelle — la génération lue est épinglée, l'écriture
+n'est acceptée que si l'objet n'a pas bougé, sinon on relit et on rejoue. Sans ça, le juge qui finit
+en dernier repose la fiche telle qu'il l'avait téléchargée et ressuscite le verbatim que le poste
+venait de retirer ; et le poste qui finit en dernier efface le verdict que le juge venait de poser.
+
+Ce mécanisme repose sur des garanties de GCS qu'aucun test unitaire ne peut vérifier.
+`server/smoke-conditional-write.mjs` les exerce contre le vrai bucket, sur un objet jetable hors du
+préfixe `cards/`, et exécute la vraie fonction en provoquant une écriture concurrente. À lancer
+avant tout déploiement qui touche à `updateCard` :
+
+```bash
+cd server && npm install
+node smoke-conditional-write.mjs
+```
 
 ## Auditer
 
@@ -199,6 +280,14 @@ sert à rejouer d'abord la fenêtre qu'on regarde ; `--until` (borne haute, excl
 longue en tranches de dates **disjointes** qu'on lance en parallèle, une fiche n'appartenant alors
 qu'à une seule tranche. Sans ça, les ~1 600 sessions d'un poste CLI tiennent une heure et demie de
 file d'attente.
+
+**Un rejeu ne rend jamais une fiche plus bavarde que celle qu'il remplace.** Il reconstruit `subject`,
+les requêtes mémoire et le texte des frictions depuis le transcript stocké : sans garde-fou, une
+passe de maintenance annulerait le réglage d'un poste qui partage son transcript mais pas son
+verbatim. La machine qui rejoue ne connaît pas la config du poste, mais la fiche stockée la porte
+dans `shares` — c'est elle qu'on réapplique avant de renvoyer. Une fiche antérieure au réglage n'a
+pas de `shares` et garde son sujet : ce verbatim est déjà stocké, le rejeu n'a pas à l'effacer,
+seulement à ne rien rajouter.
 
 ## Notes de terrain
 

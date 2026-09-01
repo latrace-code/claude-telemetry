@@ -15,6 +15,7 @@ import { createGzip } from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import { analyzeTranscript, readEvents, scanSidechains } from './telemetry-lib.mjs';
 import { STATE_DIR, QUEUE_DIR, SENT_FILE, LOCK_FILE, PROJECTS_DIR, loadConfig, projectAllowed, scopeActive } from './paths.mjs';
+import { localDetector, redactCard, shareTranscripts } from './privacy.mjs';
 
 const LOCK_TTL_MS = 15 * 60 * 1000;
 const RESCAN_WINDOW_MS = 7 * 24 * 3600 * 1000;
@@ -104,6 +105,10 @@ async function sendOne(item) {
   const { card } = item;
   await post('/v1/sessions', { card });
 
+  // La fiche part toujours ; le transcript seulement si le poste l'a demande. C'est tout ce que ce
+  // reglage change cote reseau : la fiche est deja partie a la ligne du dessus, complete.
+  if (!shareTranscripts(cfg)) return;
+
   const files = sessionFiles(item.transcript_path, item.session_dir);
   if (!files.length) return;
 
@@ -134,6 +139,56 @@ function markSent(sid) {
   try { writeFileSync(SENT_FILE, JSON.stringify(trimmed)); } catch { /* disque plein */ }
 }
 
+// Le detecteur local se choisit AUSSI a l'envoi, et pour la meme raison que le caviardage : la fiche
+// a pu etre calculee quand le transcript partait encore. Elle sort alors `judged:false`, ce qui est
+// voulu -- la passe haiku fait mieux, et elle la reprendra depuis le transcript stocke. Mais si le
+// poste a coupe `transcripts` entre-temps, ce transcript ne partira plus : le juge n'aura jamais de
+// matiere et `signals.friction` resterait null POUR TOUJOURS, exactement le trou que ce reglage
+// devait eviter. Meme cas pour une fiche enfilee par une version anterieure du capteur.
+//
+// On repasse donc le detecteur deterministe sur le transcript, encore present sur le disque, et on
+// ne releve que le verdict -- les compteurs de la fiche, eux, ont ete calcules par le hook avec les
+// sidechains sous la main, et ils font foi. A appeler AVANT redactCard : les frictions produites ici
+// portent leur texte.
+function judgeLocally(item, detector) {
+  try {
+    const fresh = analyzeTranscript(readEvents(readFileSync, item.transcript_path), { sid: item.card.sid }, detector);
+    const { friction, regression, correction, validation } = fresh.signals || {};
+    item.card.signals = { ...(item.card.signals || {}), friction, regression, correction, validation };
+    item.card.friction_prompts = fresh.friction_prompts || [];
+    item.card.judged = true;
+    item.card.judged_by = 'regex-local';
+  } catch { /* transcript purge depuis : la fiche part telle quelle, judged:false */ }
+}
+
+// Et le sens inverse : le transcript repart, donc la passe haiku aura de la matiere et fera mieux
+// que la regex. Le verdict local qu'on avait pose empecherait justement de la reprendre -- cette
+// passe filtre sur `judged` -- et on garderait le moins bon des deux verdicts pour toujours.
+//
+// Effacer un verdict est ce qui a coute 84 verdicts le 27/07, mais c'etait AVANT carryOverVerdict :
+// une fiche qui repart `judged:false` se voit desormais reposer le verdict deja stocke par le
+// serveur, s'il en existe un. Le seul intervalle a nu est celui d'avant la passe haiku, qui est
+// l'etat normal de toute fiche d'un poste qui partage ses transcripts.
+//
+// Rendre la fiche au juge n'a de sens que si le juge aura de la matiere. Claude Code purge ses
+// propres transcripts au bout de `cleanupPeriodDays`, et un item peut avoir attendu des jours dans
+// la file : le fichier a pu disparaitre entre le calcul de la fiche et son envoi. Sans cette
+// verification, on jette un verdict utilisable pour un juge qui ne verra jamais rien -- et ca ne
+// leve nulle part : `sendOne` ne trouve aucun fichier, ne televerse rien, rend la main sans erreur,
+// la fiche part sans verdict et l'item quitte la file pour de bon.
+const hasTranscript = item => sessionFiles(item.transcript_path, item.session_dir).length > 0;
+
+// UNIQUEMENT le verdict qu'on a pose nous-memes : un `judged:true` sans provenance ne vient pas
+// d'ici, on n'y touche pas. Les signaux repassent a null et pas a zero -- `judged:false` avec
+// friction:0 dirait "juge, rien trouve" la ou il faut lire "pas encore juge", et confondre les deux
+// est la panne du 16/07.
+function unjudgeLocal(card) {
+  card.signals = { ...(card.signals || {}), friction: null, regression: null, correction: null, validation: null };
+  card.friction_prompts = [];
+  card.judged = false;
+  delete card.judged_by;
+}
+
 async function drain() {
   let names = [];
   try { names = readdirSync(QUEUE_DIR).filter(n => n.endsWith('.json')); } catch { return; }
@@ -144,6 +199,24 @@ async function drain() {
     // Filet : un item hors perimetre (enfile avant l'activation de l'allowlist, ou par une version
     // anterieure du capteur) est retire de la file sans etre envoye.
     if (!projectAllowed(basename(dirname(item.transcript_path || '')), cfg)) { try { unlinkSync(p); } catch {} continue; }
+    // Le reglage s'applique a l'instant ou la fiche PART, pas a celui ou elle a ete calculee. Une
+    // fiche peut avoir attendu ici plusieurs jours (cinq tentatives), avoir ete enfilee par une
+    // version anterieure du capteur -- donc avec tout son verbatim et sans `shares` -- ou avoir
+    // traverse un changement d'avis du poste. Sans ce second passage, une mise a jour vers le defaut
+    // `false` enverrait quand meme le verbatim de tout ce qui trainait dans la file, et couper le
+    // reglage ne couperait rien pour les fiches deja calculees. Repasser le caviardage ne peut que
+    // retirer : c'est le seul endroit qui sait ce que le poste veut aujourd'hui.
+    //
+    // Le detecteur suit la meme regle, et `localDetector` porte deja la decision : il rend le
+    // detecteur regex quand le transcript ne part pas, null quand il part. LES DEUX SENS comptent,
+    // parce qu'une fiche peut avoir change de monde entre son calcul et son envoi : sans transcript
+    // il faut poser un verdict que personne d'autre ne posera, avec transcript il faut retirer le
+    // notre pour que la passe haiku puisse faire mieux. En regime normal aucun des deux ne se
+    // declenche, le hook ayant pris la meme decision sur la meme config.
+    const detector = localDetector(cfg);
+    if (detector && !item.card.judged) judgeLocally(item, detector);
+    else if (!detector && item.card.judged_by === 'regex-local' && hasTranscript(item)) unjudgeLocal(item.card);
+    redactCard(item.card, cfg);
     try {
       await sendOne(item);
       markSent(item.card.sid);
@@ -204,7 +277,7 @@ function rescan() {
         sid: c.sid,
         project: c.proj.replace(/^-/, '').split('-').pop() || c.proj,
         sidechains: scanSidechains(fs, sessionDir),
-      });
+      }, localDetector(cfg));
       if (!card.subject || (card.user_prompts < 1 && !card.automated)) { markSent(c.sid); continue; }
       card.user = cfg.user || userInfo().username;
       card.host = hostname();
@@ -212,6 +285,8 @@ function rescan() {
       card.client_version = cfg.version || null;
       card.scoped = scopeActive(cfg);
       card.recovered = true;
+      if (card.judged) card.judged_by = 'regex-local';
+      redactCard(card, cfg);
       mkdirSync(QUEUE_DIR, { recursive: true });
       writeFileSync(join(QUEUE_DIR, `${c.sid}.json`), JSON.stringify({
         card, transcript_path: c.abs, session_dir: sessionDir,

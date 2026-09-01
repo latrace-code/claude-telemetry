@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { analyzeTranscript, readEvents, scanSidechains } from './telemetry-lib.mjs';
 import { STATE_DIR, QUEUE_DIR, loadConfig, projectAllowed, scopeActive } from './paths.mjs';
+import { localDetector, redactCard } from './privacy.mjs';
 
 // Mesure : 5,1 s pour les 336 Mo d'une nuit orchestree. Au-dela du budget la fiche sort
 // `partial:true` ; le serveur garde le transcript complet, donc rien n'est perdu.
@@ -82,7 +83,10 @@ function main() {
   const events = readEvents(readFileSync, transcriptPath);
   const sessionDir = transcriptPath.replace(/\.jsonl$/, '');
   const sidechains = scanSidechains(fs, sessionDir, { budgetMs: SIDECHAIN_BUDGET_MS });
-  const card = analyzeTranscript(events, { sid, project: projectLabel(cwd), sidechains });
+  // Detecteur local quand le transcript ne part pas : le juge haiku tourne sur la machine d'audit a
+  // partir du transcript stocke, donc sans transcript il n'a plus de matiere et signals.friction
+  // resterait null pour toujours. On calcule le signal ici, on n'envoie que le compte et le cout.
+  const card = analyzeTranscript(events, { sid, project: projectLabel(cwd), sidechains }, localDetector(cfg));
 
   if (!card.subject || (card.user_prompts < 1 && !card.automated)) process.exit(0);
 
@@ -101,6 +105,12 @@ function main() {
   // Sans ce temoin, il serait indistinguable d'un poste peu actif : la mesure deviendrait
   // declarative sans que personne ne le voie. Le detail des chemins ne remonte pas, seul le fait.
   card.scoped = scopeActive(cfg);
+  // `judged` dit qu'un detecteur a tourne, `judged_by` dit lequel : une regex sur le poste et un
+  // verdict haiku n'ont pas la meme valeur, les confondre a la lecture fausserait la comparaison.
+  if (card.judged) card.judged_by = 'regex-local';
+  // Retire le verbatim (sujet, texte des frictions, requetes memoire) si le poste ne le partage pas.
+  // APRES la garde `!card.subject` ci-dessus, jamais avant : subject sert de garde a cette fiche.
+  redactCard(card, cfg);
 
   mkdirSync(QUEUE_DIR, { recursive: true });
   writeFileSync(join(QUEUE_DIR, `${sid}.json`), JSON.stringify({

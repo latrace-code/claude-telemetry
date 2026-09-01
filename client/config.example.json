@@ -3,5 +3,7 @@
   "token": "<jeton d'ingestion>",
   "user": "<prenom>",
   "version": "1.0.0",
-  "include_projects": ["/chemin/absolu/vers/un/depot"]
+  "include_projects": ["/chemin/absolu/vers/un/depot"],
+  "transcripts": false,
+  "prompt_text": false
 }

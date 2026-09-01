@@ -25,6 +25,7 @@ import { execFileSync } from 'node:child_process';
 import { createGunzip } from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import { analyzeTranscript, readEvents, scanSidechains } from '../client/telemetry-lib.mjs';
+import { redactCard } from '../client/privacy.mjs';
 
 const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i > -1 ? process.argv[i + 1] : d; };
 const user = arg('user');
@@ -99,12 +100,27 @@ for (const s of sessions.values()) {
     // en silence tout le travail du juge. Vu deux fois en une heure le 22/07, les deux passes tournant
     // le meme jour sur les memes fiches. Le juge repassera de toute facon et rafraichira le verdict si
     // les prompts ont bouge ; entre-temps, mieux vaut l'ancien verdict que pas de verdict du tout.
-    if (old.judged) {
+    // Sauf un verdict de regex locale : cette passe ne rejoue QUE des sessions dont le transcript est
+    // stocke, donc le juge a de la matiere et fera mieux. Le reprendre figerait le repli sur la seule
+    // population ou le meilleur verdict est a portee de main.
+    if (old.judged && old.judged_by !== 'regex-local') {
       card.signals = { ...card.signals, ...pick(old.signals, ['friction', 'correction', 'regression']) };
       card.friction_prompts = old.friction_prompts || [];
       card.judged = true;
+      // La provenance voyage avec le verdict : reprendre les mesures en laissant tomber `judged_by`
+      // ferait passer pour indetermine un verdict haiku parfaitement identifie.
+      if (old.judged_by) card.judged_by = old.judged_by;
       card.judged_at = old.judged_at;
     }
+    // `shares` dit ce que le poste a declare partager. Cette passe RECONSTRUIT `subject`, les
+    // requetes memoire et le texte des frictions depuis le transcript stocke : sur un poste qui
+    // partage son transcript mais pas son verbatim, elle reposerait donc exactement ce qu'il avait
+    // retire, et une simple passe de maintenance annulerait son reglage. La machine qui rejoue ne
+    // connait pas sa config ; la fiche stockee la porte, et elle suffit.
+    // Regle : un rejeu ne rend jamais une fiche plus bavarde que celle qu'il remplace. Une fiche
+    // anterieure au reglage n'a pas de `shares` et garde son sujet -- ce verbatim est deja stocke,
+    // le rejeu n'a pas a l'effacer, seulement a ne rien rajouter.
+    if (old.shares) redactCard(card, old.shares);
     card.user = card.user || user;
     card.recomputed = true;
 
