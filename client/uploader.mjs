@@ -170,6 +170,14 @@ function judgeLocally(item, detector) {
 // serveur, s'il en existe un. Le seul intervalle a nu est celui d'avant la passe haiku, qui est
 // l'etat normal de toute fiche d'un poste qui partage ses transcripts.
 //
+// Rendre la fiche au juge n'a de sens que si le juge aura de la matiere. Claude Code purge ses
+// propres transcripts au bout de `cleanupPeriodDays`, et un item peut avoir attendu des jours dans
+// la file : le fichier a pu disparaitre entre le calcul de la fiche et son envoi. Sans cette
+// verification, on jette un verdict utilisable pour un juge qui ne verra jamais rien -- et ca ne
+// leve nulle part : `sendOne` ne trouve aucun fichier, ne televerse rien, rend la main sans erreur,
+// la fiche part sans verdict et l'item quitte la file pour de bon.
+const hasTranscript = item => sessionFiles(item.transcript_path, item.session_dir).length > 0;
+
 // UNIQUEMENT le verdict qu'on a pose nous-memes : un `judged:true` sans provenance ne vient pas
 // d'ici, on n'y touche pas. Les signaux repassent a null et pas a zero -- `judged:false` avec
 // friction:0 dirait "juge, rien trouve" la ou il faut lire "pas encore juge", et confondre les deux
@@ -207,7 +215,7 @@ async function drain() {
     // declenche, le hook ayant pris la meme decision sur la meme config.
     const detector = localDetector(cfg);
     if (detector && !item.card.judged) judgeLocally(item, detector);
-    else if (!detector && item.card.judged_by === 'regex-local') unjudgeLocal(item.card);
+    else if (!detector && item.card.judged_by === 'regex-local' && hasTranscript(item)) unjudgeLocal(item.card);
     redactCard(item.card, cfg);
     try {
       await sendOne(item);
