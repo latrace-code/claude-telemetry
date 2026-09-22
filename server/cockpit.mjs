@@ -469,10 +469,15 @@ export function renderCockpit(rawCards, { days: windowDays = 30, generatedAt = '
   const intensityCov = totals.active ? Math.round((100 * totals.covActive) / totals.active) : 0;
 
   const recent = [...cards].sort((a, b) => String(b.ts_start).localeCompare(String(a.ts_start))).slice(0, 60);
-  const frictions = cards
+  // Un poste qui ne partage pas son verbatim envoie ses frictions SANS texte : le compte et le cout
+  // sont la, la phrase est restee sur la machine. On ne rend que celles qui portent un texte, et on
+  // dit combien sont muettes plutot que d'afficher des blocs vides.
+  const allFrictions = cards
     .flatMap(c => (c.friction_prompts || []).map(f => ({ ...f, user: c.user, date: c.date, project: c.project })))
-    .sort((a, b) => String(b.date).localeCompare(String(a.date)))
-    .slice(0, 25);
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const quoted = allFrictions.filter(f => f.text);
+  const frictions = quoted.slice(0, 25);
+  const mutes = allFrictions.length - quoted.length;
 
   const q = u => `?days=${windowDays}${u ? '&user=' + encodeURIComponent(u) : ''}`;
   const keepBots = bots ? '&bots=1' : '';
@@ -666,7 +671,8 @@ ${capteurs.stale.length ? `<div class="warn"><b>Capteur en retard sur ${capteurs
   ${frictions.length ? frictions.map(f => `<div class="fr">
       <div class="fr-m">${esc(f.date)} · ${esc(f.user || '')}${f.project ? ' · ' + esc(f.project) : ''}${f.famille ? ' · ' + esc(f.famille) : ''}</div>
       <div>${esc(f.text)}</div></div>`).join('')
-    : '<p class="empty">Aucune friction verbalisee detectee sur la periode.</p>'}
+    : '<p class="empty">Aucune friction verbalisee avec texte sur la periode.</p>'}
+  ${mutes ? `<p class="note">${nf(mutes)} friction(s) comptee(s) sans texte : ces postes partagent le compte et le cout, pas la phrase. Elles restent dans les totaux ci-dessus.</p>` : ''}
 </section>
 
 <section>
@@ -680,7 +686,7 @@ ${capteurs.stale.length ? `<div class="warn"><b>Capteur en retard sur ${capteurs
         <td class="tag">${esc(c.date)}</td>
         <td><span class="who"><i style="background:var(--s${colorOf.get(c.user) ?? 0})"></i>${esc(c.user || '')}</span></td>
         <td class="tag">${esc(c.project || '')}</td>
-        <td class="subj" title="${esc(c.subject)}">${esc(c.subject)}</td>
+        <td class="subj" title="${esc(c.subject || '')}">${c.subject ? esc(c.subject) : '<span class="tag">—</span>'}</td>
         <td class="num">${hoursLabel(c.active_min || 0)}</td>
         <td class="num">${nf(c.user_prompts)}</td>
         <td class="num">${nf(c.tools_total_all ?? c.tools_total)}</td>
