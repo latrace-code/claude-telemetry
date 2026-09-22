@@ -244,6 +244,38 @@ const WRITE_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit']);
 
 // perMessage : Map(clé de message -> { n: blocs tool_use, w: dont écritures }).
 // null quand la session n'a émis aucun outil : rien à afficher vaut mieux qu'un zéro trompeur.
+// schema 8 : DEBIT DE GENERATION PAR TRANCHE DE CONTEXTE. Mesure faite hors ligne le 2026-09-15
+// (plat de 0 a 400 k, 66 a 68 tok/s : le contexte ne coutait alors que du cache) puis le 2026-09-22,
+// ou elle avait change de sens : 70,1 tok/s entre 100 et 200 k, 60,9 au-dela de 400 k, soit -13 %.
+// Un fait qui bascule d'une semaine a l'autre doit etre dans la fiche, pas dans un script qu'on
+// relance deux fois par mois. C'est le seul argument mesure pour couper une session a temps.
+const CTX_BUCKETS = [[0, 100e3, '0-100k'], [100e3, 200e3, '100-200k'], [200e3, 300e3, '200-300k'],
+  [300e3, 400e3, '300-400k'], [400e3, Infinity, '400k+']];
+
+function summarizeThroughput(samples) {
+  // Memes bornes que speed.mjs pour rester comparable : on ecarte les requetes trop courtes pour
+  // que le rapport tokens/temps veuille dire quelque chose, et les sorties minuscules.
+  const retenus = samples.filter(x => x.gen > 500 && x.out > 50);
+  if (!retenus.length) return null;
+  const med = (a) => { if (!a.length) return 0; const t = [...a].sort((x, y) => x - y); return t[Math.floor(t.length / 2)]; };
+  const par = CTX_BUCKETS.map(([lo, hi, nom]) => {
+    const d = retenus.filter(x => x.ctx >= lo && x.ctx < hi).map(x => x.out / (x.gen / 1000));
+    return { ctx: nom, n: d.length, tok_s: d.length ? Math.round(med(d) * 10) / 10 : null };
+  });
+  const genTotal = retenus.reduce((a, x) => a + x.gen, 0);
+  const outTotal = retenus.reduce((a, x) => a + x.out, 0);
+  return {
+    req_measured: retenus.length,
+    gen_min: Math.round(genTotal / 60000),
+    s_per_req: Math.round((genTotal / 1000 / retenus.length) * 10) / 10,
+    tok_per_req: Math.round(outTotal / retenus.length),
+    // Les documents ecrits en heredoc : peu de requetes, une grosse part de la generation.
+    big_out_calls: retenus.filter(x => x.out > 3000).length,
+    big_out_gen_pct: Math.round((100 * retenus.filter(x => x.out > 3000).reduce((a, x) => a + x.gen, 0)) / genTotal),
+    by_ctx: par,
+  };
+}
+
 function summarizeToolBatch(perMessage) {
   let calls = 0, tools = 0, singleTool = 0, writeCalls = 0, writes = 0, singleWrite = 0;
   for (const b of perMessage.values()) {
@@ -312,6 +344,8 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
 
   const brainAcc = newBrainAcc();
   const toolsPerMsg = new Map();
+  const debitParReq = new Map();
+  let tsDernierEvenement = null;
   let anonMsgSeq = 0;
   // Session courante : sert a ecarter les messages rejoues d'une conversation dont celle-ci est issue.
   const ownSid = meta.sid || null;
@@ -382,6 +416,9 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     }
 
     const ts = parseTs(e && e.timestamp);
+    // schema 8 : le ts du dernier evenement date, LU avant d'etre ecrase par celui-ci.
+    const tsAvant = tsDernierEvenement;
+    if (ts !== null) tsDernierEvenement = ts;
     if (ts !== null) {
       if (isTimelineEvent(e)) {
         if (start === null || ts < start) start = ts;
@@ -412,6 +449,19 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
         inTok += u.input_tokens || 0;
         outTok += u.output_tokens || 0;
         cacheR += u.cache_read_input_tokens || 0;
+        if (ts !== null && tsAvant !== null) {
+          debitParReq.set(mid || `#${anonMsgSeq}`, {
+            ctx: (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0),
+            out: u.output_tokens || 0,
+            gen: ts - tsAvant,
+            fin: ts,
+            debut: tsAvant,
+          });
+        }
+      } else if (ts !== null && mid && debitParReq.has(mid)) {
+        // Le transcript ecrit un evenement par bloc : la generation court jusqu'au DERNIER.
+        const ech = debitParReq.get(mid);
+        if (ts > ech.fin) { ech.fin = ts; ech.gen = ts - ech.debut; }
       }
       if (Array.isArray(m.content)) {
         // Même clé que parallelism.mjs : l'id du message API, l'uuid de la ligne en dernier recours.
@@ -527,6 +577,8 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     brain_all: mergeBrain(finishBrain(brainAcc), (meta.sidechains && meta.sidechains.brain) || null),
     // Groupage des outils par appel API. `tool_batch` = session mère seule, `tool_batch_all` = mère +
     // agents, même convention que tools_total / tools_total_all. null = la session n'a émis aucun outil.
+    // Debit de generation par tranche de contexte (schema 8). null = rien de mesurable.
+    throughput: summarizeThroughput([...debitParReq.values()]),
     tool_batch: summarizeToolBatch(toolsPerMsg),
     tool_batch_all: mergeToolBatch(summarizeToolBatch(toolsPerMsg), (meta.sidechains && meta.sidechains.tool_batch) || null),
     agents_total: meta.sidechains ? Math.max(subagents, meta.sidechains.agents) : subagents,
@@ -551,7 +603,7 @@ export function analyzeTranscript(events, meta = {}, detector = null) {
     // qui lit signals.friction sans regarder `judged` lira null et doit le traiter comme "inconnu",
     // jamais comme zéro.
     judged: !!detector,
-    schema: 7,
+    schema: 8,
   };
 }
 
@@ -624,10 +676,20 @@ export function scanSidechains(fs, sessionDir, opts = {}) {
   const brainAcc = newBrainAcc();
   const toolsPerMsg = new Map();
   let anonMsgSeq = 0;
+  // SILENCE DES AGENTS (schema 8). Audit du 2026-09-02, 32 agents de trois demos : 2 666 tours pour
+  // 171 jalons annonces, soit un signe de vie tous les 15,6 tours, et 515 minutes de silence cumule
+  // au-dela de 5 min. Consequence mesuree dans la mere : douze tours dont le contenu entier est
+  // « j'attends » et dix relances humaines. Un agent muet n'est pas un agent lent, c'est un agent
+  // qu'on ne peut ni superviser ni interrompre a temps : c'est ce qui a laisse tourner 67 minutes
+  // un agent qui construisait la mauvaise chose. On mesure donc le SIGNAL, pas seulement le volume.
+  // Un jalon = un bloc `text` de l'agent en cours de route (son rapport final en est un aussi).
+  let steps = 0, silenceMs = 0, muteAgents = 0;
+  const SILENCE_MIN_MS = 5 * 60 * 1000;
   for (const path of files) {
     if (Date.now() - t0 > budgetMs) break;
     let raw;
     try { raw = fs.readFileSync(path, 'utf8'); } catch { continue; }
+    let fileSteps = 0, lastSignal = null;
     for (const line of raw.split('\n')) {
       const s = line.trim();
       if (!s) continue;
@@ -635,7 +697,21 @@ export function scanSidechains(fs, sessionDir, opts = {}) {
       try { e = JSON.parse(s); } catch { continue; }
       const m = e && e.message;
       if (!m) continue;
+      const ts = e.timestamp ? parseTs(e.timestamp) : null;
+      if (ts !== null && lastSignal === null) lastSignal = ts;
       if (m.role === 'assistant') {
+        if (Array.isArray(m.content)) {
+          for (const b of m.content) {
+            // Meme seuil que l'audit : sous 50 caracteres c'est un fragment, pas un point d'etape.
+            if (b && b.type === 'text' && typeof b.text === 'string' && b.text.trim().length > 50) {
+              fileSteps++;
+              if (ts !== null && lastSignal !== null && ts - lastSignal > SILENCE_MIN_MS) {
+                silenceMs += ts - lastSignal;
+              }
+              if (ts !== null) lastSignal = ts;
+            }
+          }
+        }
         const mid = m.id || null;
         if (!mid || !seenAgentTurns.has(mid)) {
           if (mid) seenAgentTurns.add(mid);
@@ -657,6 +733,10 @@ export function scanSidechains(fs, sessionDir, opts = {}) {
         for (const b of m.content) if (b && b.type === 'tool_result' && b.is_error) toolErrors++;
       }
     }
+    steps += fileSteps;
+    // Deux jalons ou moins sur toute une vie d'agent : on ne sait pas ce qu'il a fait pendant qu'il
+    // le faisait. 13 des 32 agents audites le 2026-09-02 sont dans ce cas.
+    if (fileSteps <= 2) muteAgents++;
     scanned++;
   }
 
@@ -667,6 +747,15 @@ export function scanSidechains(fs, sessionDir, opts = {}) {
     workflows,
     workflow_min: workflows.reduce((a, w) => a + w.min, 0),
     turns,
+    // Sante de la supervision, pas volume : combien de fois les agents ont dit ou ils en etaient,
+    // combien de minutes ils ont passees sans rien dire, et combien d'entre eux sont restes muets.
+    // `turns_per_step` est le chiffre a suivre. Ligne de base posee par cette mesure sur les trois
+    // demos du 2026-09-02 : 16,0 tours par jalon, 460 min de silence, 14 agents muets sur 32.
+    // Cible : sous 10 tours par jalon, ce qui correspond au contrat injecte par subagent-style.mjs.
+    steps,
+    turns_per_step: steps ? +(turns / steps).toFixed(1) : null,
+    silence_min: Math.round(silenceMs / 60000),
+    mute_agents: muteAgents,
     tokens_out: tokensOut,
     tools_total: toolsTotal,
     tool_errors: toolErrors,
